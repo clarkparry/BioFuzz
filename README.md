@@ -127,12 +127,12 @@ SMILES is the lingua franca of the mutation engine: molecules are read, mutated,
 ┌─────────────────────────────────────────────────────────────────┐
 │                       DOCKING ENGINE                            │
 │   Gnina / AutoDock Vina                                         │
-│   Protein PDBQT + Ligand PDBQT + Binding box config            │
+│   Protein PDBQT + Ligand PDBQT + Binding box config             │
 │   Output: binding affinity (kcal/mol) + docked pose             │
 └────────┬───────────────────────────────────────────────────────-┘
          │                              │
          ▼                              ▼
-┌─────────────────┐           ┌──────────────────────┐
+┌─────────────────┐           ┌───────────────────────┐
 │  COVERAGE MAP   │           │    BUG ORACLE         │
 │                 │           │                       │
 │  Parse pose →   │           │  Affinity threshold   │
@@ -142,7 +142,7 @@ SMILES is the lingua franca of the mutation engine: molecules are read, mutated,
 │  New bits? →    │           │                       │
 │  add to corpus  │           │  Hit? → save to       │
 │  + reprioritize │           │  findings corpus      │
-└─────────────────┘           └──────────────────────┘
+└─────────────────┘           └───────────────────────┘
 ```
 
 ---
