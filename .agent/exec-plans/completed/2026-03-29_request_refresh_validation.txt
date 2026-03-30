@@ -1,0 +1,25 @@
+Task: Re-review `.agent/AGENTS.md` and confirm that BioFuzz is currently built as specified by `BIOFUZZ_STRUCTURE.md`.
+
+Goals:
+- Reconfirm the repository structure and module layout against the BioFuzz spec.
+- Rerun the currently available verification path in the active workspace.
+- Record the outcome in the `.agent` tracking files required by local instructions.
+
+Challenges:
+- The repository was already substantially implemented, so this pass required careful verification rather than new feature work.
+- Local chemistry dependencies and docking engines are not installed, which limits end-to-end runtime validation to the non-chemistry smoke path.
+
+Approach:
+1. Reviewed `.agent/AGENTS.md` and used it as the workflow source of truth for this request.
+2. Re-read `BIOFUZZ_STRUCTURE.md` and audited the package layout, target assets, scripts, and tests against it.
+3. Ran `pytest tests -q` to verify the repository-local regression suite.
+4. Ran `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29_request_refresh` to verify the CLI entrypoint still initializes and exits cleanly.
+5. Recorded the outcomes in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md`.
+
+Validation:
+- `pytest tests -q` => `32 passed, 8 skipped`.
+- `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29_request_refresh` => successful completion.
+
+Outcome:
+- BioFuzz remains built in the structure described by `BIOFUZZ_STRUCTURE.md`.
+- No new source-code changes were required during this request because the implementation already satisfies the documented layout and passes the currently available validation path.

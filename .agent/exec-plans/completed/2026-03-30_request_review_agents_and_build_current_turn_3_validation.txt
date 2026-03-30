@@ -1,0 +1,23 @@
+Task: Review `.agent/AGENTS.md` and validate/build the current BioFuzz workspace against `BIOFUZZ_STRUCTURE.md` with a fresh request-scoped smoke run for this turn.
+
+Challenges:
+- Validate the current live repository directly instead of relying on the long `.agent/` confirmation history already in the workspace.
+- Distinguish repository completeness from the missing local chemistry/runtime toolchain so the request closes accurately.
+- Record this request cleanly in the required `.agent` tracking files without making speculative BioFuzz source edits.
+
+Approaches Considered:
+- Rebuild the BioFuzz modules from the structure document again even though the documented package tree and phase modules already exist.
+- Re-audit the live implementation, rerun the verification path, and only change source files if a concrete mismatch appears.
+
+Successful Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+- Re-verified the workspace with `git branch --show-current`, `python3 -m pytest tests -v`, `python3 .agent/tools/runtime_audit.py`, and `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_review_agents_and_build_current_turn_3`.
+- Confirmed the fresh smoke-run output created `coverage.json`, `corpus/state.json`, and the mirrored `corpus.json` under the documented run layout.
+- Updated the `.agent/` tracking files with the results of this request-scoped validation pass.
+
+Outcome:
+- Branch status: `develop`.
+- Verification status: `41 passed, 10 skipped` and a successful fresh zero-iteration CLI smoke run with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=10000`, and `best_affinity=0.0`.
+- Implementation status: the current repository already matches `BIOFUZZ_STRUCTURE.md`, so no new BioFuzz source-code edits were required for this request.
+- Runtime status: `live_run_ready: False`; `PyYAML` available; `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in this workspace.
+- Remaining blocker: live non-zero chemistry/docking runs remain environment-blocked until the local chemistry/runtime toolchain is installed.

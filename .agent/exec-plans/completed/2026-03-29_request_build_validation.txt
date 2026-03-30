@@ -1,0 +1,24 @@
+Task: Review `.agent/AGENTS.md` guidance and validate/build BioFuzz against `BIOFUZZ_STRUCTURE.md`.
+
+Goals:
+- Confirm the repository matches the documented BioFuzz package structure and phase architecture.
+- Verify the current implementation still passes automated validation and the CLI entrypoint smoke path.
+- Fill any remaining repository-local gap needed for stronger spec conformance.
+
+Challenges:
+- The codebase was already substantially implemented, so the main work was identifying true spec gaps versus environmental constraints.
+- Live phase completion criteria involving RDKit, Meeko, and docking binaries could not be executed in this workspace because those dependencies are not installed.
+
+Approach:
+1. Reviewed `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+2. Audited the package layout, target fixtures, scripts, and tests against the documented phases.
+3. Ran the full test suite and a zero-iteration CLI smoke run.
+4. Added the missing `filters.py` regression tests called for by the spec's testing strategy.
+5. Recorded outcomes in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md`.
+
+Validation:
+- `pytest -q` => `27 passed, 8 skipped`.
+- `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29_buildpass_fresh` => successful completion.
+
+Outcome:
+- BioFuzz remains structurally aligned with the documented 10-phase design, has explicit regression coverage for the molecule filter layer, and has current project-tracking records under `.agent/`.

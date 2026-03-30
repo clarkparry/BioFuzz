@@ -1,0 +1,29 @@
+Task
+
+- Review `.agent/AGENTS.md` and verify that the live BioFuzz workspace is built according to `BIOFUZZ_STRUCTURE.md`.
+
+Challenges
+
+- Avoid relying on the long existing `.agent` confirmation chain; re-check the live workspace directly.
+- Distinguish repository completeness from machine-specific runtime limits.
+- Produce a fresh request-scoped verification artifact without changing working BioFuzz source code unnecessarily.
+
+Approaches Considered
+
+- Rebuild or refactor project modules again. Rejected because the repository already matches the documented structure and the safer change is no functional change.
+- Re-run the validated `.venv` verification path and capture a fresh smoke-run artifact. Chosen because it directly answers the request with current evidence.
+
+Successful Approach
+
+- Re-read `.agent/AGENTS.md` and re-audited the live repository structure against `BIOFUZZ_STRUCTURE.md`.
+- Verified the workspace remains on `develop`.
+- Ran `./.venv/bin/python -m pytest tests -q` and confirmed `51 passed`.
+- Ran `./.venv/bin/python .agent/tools/runtime_audit.py` and confirmed `PyYAML`, `RDKit`, and `Meeko` are available in `.venv`.
+- Ran the Phase 1 preparation check with aspirin and confirmed `prepare_smiles()` returned a PDBQT containing `TORSDOF`.
+- Ran `./.venv/bin/python main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_current_request_live` and confirmed the documented run artifacts were created: `coverage.json`, `corpus/state.json`, and the mirrored `corpus.json`.
+
+Outcome
+
+- BioFuzz is already built to `BIOFUZZ_STRUCTURE.md` in the current repository.
+- No new BioFuzz source-code changes were required for this request.
+- The remaining blocker for live non-zero docking runs is the absence of a supported docking binary (`gnina`, `vina`, `quickvina2`, or `quickvina-w`) on this machine.

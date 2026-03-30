@@ -1,0 +1,27 @@
+Task: Review `.agent/AGENTS.md` and confirm that BioFuzz remains built according to `BIOFUZZ_STRUCTURE.md`.
+
+Goals:
+- Re-read the local agent instructions and use them as the workflow for this request.
+- Re-audit the repository layout, package modules, scripts, targets, and tests against the BioFuzz structure document.
+- Re-run the currently available verification path and record the outcome in the required `.agent` tracking files.
+
+Challenges:
+- The repository was already substantially implemented, so the main risk was overlooking a quiet spec drift rather than missing a large feature.
+- The local workspace still lacks chemistry dependencies and docking binaries, so end-to-end docking milestones cannot be exercised here even if the code is present.
+
+Approach:
+1. Reviewed `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md` before making any changes.
+2. Audited the current repository tree and implementation modules against the documented BioFuzz package layout and phase interfaces.
+3. Ran `pytest tests -q` to verify the automated test suite.
+4. Ran `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29_request_new` to verify the CLI entrypoint still initializes and exits cleanly.
+5. Checked local dependency availability for `yaml`, `rdkit`, `meeko`, and supported docking binaries.
+6. Recorded the results in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md`.
+
+Validation:
+- `pytest tests -q` => `32 passed, 8 skipped`
+- `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29_request_new` => successful completion with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=6`, `best_affinity=0.0`
+- Dependency audit => `yaml` available; `rdkit`, `meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in this workspace
+
+Outcome:
+- BioFuzz remains built in the structure described by `BIOFUZZ_STRUCTURE.md`; no BioFuzz source-code edits were required for this request.
+- The remaining gap is environmental rather than structural: chemistry and docking milestones are still blocked locally by missing third-party tooling.

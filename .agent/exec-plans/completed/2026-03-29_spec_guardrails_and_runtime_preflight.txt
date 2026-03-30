@@ -1,0 +1,27 @@
+Task: Spec guardrails and runtime preflight hardening after reviewing `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+
+Goals:
+- Preserve the current BioFuzz structure while fixing subtle behaviors that could diverge from the spec at runtime.
+- Add regression coverage for the new guardrails so later confirmation passes do not regress them.
+- Keep the zero-iteration smoke path runnable in an environment without chemistry dependencies while making live runs fail clearly.
+
+Challenges:
+- The repository already passed its visible tests, so the remaining gaps were mostly hidden-edge semantics rather than missing modules.
+- Tightening strict preparation semantics risked breaking environments that previously relied on the fallback PDBQT writer implicitly.
+- Path normalization had to prefer target-local assets without breaking existing configs that already used root-relative target paths.
+
+Approach:
+1) Audited runtime behavior against the structure doc and reviewed key files for hidden edge cases.
+2) Hardened config/oracle semantics by tracking explicit oracle fields and merging global defaults only into fields that were not set by the target.
+3) Made `prepare_smiles()` require successful Meeko output by default, leaving fallback generation as an explicit opt-in.
+4) Added resume safety checks so mismatched coverage checkpoints are skipped and resumed corpora are trimmed back to the active `max_corpus_size`.
+5) Tightened persistence/runtime behavior by requiring real pose files for saved findings, pinning docking subprocesses to one CPU, and adding CLI dependency preflight for live fuzzing runs.
+6) Updated the bundled HIV protease target config to use target-local receptor paths and expanded the test suite around the hardened behaviors.
+
+Validation:
+- `pytest -q` => `39 passed, 10 skipped`.
+- `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29_build_request_hardening_v2` => successful completion.
+- `python3 main.py --target hiv_protease --max-iterations 1 --workers 1 --output runs/smoke_cli_2026_03_29_preflight_check` => expected dependency preflight failure (`RDKit`, `Meeko`, `gnina`).
+
+Outcome:
+- BioFuzz still matches the requested project structure, but now does so with stricter and safer runtime semantics that better reflect the documented build phases and failure modes.

@@ -1,0 +1,37 @@
+Task: Oracle Gating + Molecule Config Follow-up
+Date: 2026-03-29
+Status: Completed
+
+Objective
+- Align remaining runtime behavior with `BIOFUZZ_STRUCTURE.md` phase guidance after prior bootstrap/alignment passes.
+
+Observed Gaps
+- `oracle.affinity.evaluate()` was invoking selectivity checks even when the affinity tier already failed.
+- Molecule gating knobs (`max_mw`, `max_logp`, `max_rot_bonds`) defined in `config.yaml` were not wired into mutation/preparation calls in the main loop.
+- Pose temp files emitted by docking were retained after processing.
+
+Approach
+1. Oracle tier sequencing
+- Updated `biofuzz/oracle/affinity.py` to gate selectivity execution behind `affinity_ok`.
+- Kept existing optional off-target behavior unchanged otherwise.
+
+2. Molecule config wiring
+- Extended `prepare_smiles()` and `mutate()` signatures to accept drug-likeness threshold overrides while preserving defaults.
+- Updated `biofuzz/core/fuzzer.py` to pass molecule thresholds into both mutation and preparation paths.
+- Updated `main.py` to pass global molecule config values into `run()`.
+
+3. Resource hygiene
+- Added per-result cleanup of temporary pose files in `biofuzz/core/fuzzer.py` using a `finally` block.
+
+4. Regression tests
+- Added oracle tests for:
+  - selectivity is skipped when affinity fails
+  - selectivity is applied when affinity passes
+- Added preparation test ensuring threshold kwargs are forwarded to `is_drug_like()`.
+
+Validation
+- `pytest -q` => `18 passed, 5 skipped`.
+- `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29` => success.
+
+Notes
+- No changes were made to `BIOFUZZ_STRUCTURE.md`, per project constraints.

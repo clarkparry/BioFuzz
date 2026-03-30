@@ -1,0 +1,27 @@
+Task: Review `.agent/AGENTS.md` and validate/build the current BioFuzz workspace against `BIOFUZZ_STRUCTURE.md` using the live `.venv` runtime.
+
+Challenges:
+- Confirm the current state directly from the live workspace instead of trusting the long chain of prior request logs in `.agent/`.
+- Distinguish between repository-build gaps and runtime-environment gaps, then avoid unnecessary code churn if the documented phase structure is already satisfied.
+- Prove the project is runnable with the checked-in target assets by exercising real chemistry and docking paths, not only zero-iteration smoke checks.
+
+Approaches Considered:
+- Rebuild or refactor BioFuzz modules preemptively from `BIOFUZZ_STRUCTURE.md` even if the current implementation already matched the document.
+- Audit the current code, run the validated `.venv` toolchain, perform direct phase checks plus a one-iteration fuzz run, and only change source files if a concrete spec mismatch appears.
+
+Successful Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+- Audited the live implementation modules, including `main.py`, `biofuzz/core/fuzzer.py`, `biofuzz/core/corpus.py`, `biofuzz/core/coverage.py`, `biofuzz/docking/config.py`, `biofuzz/docking/runner.py`, `biofuzz/molecules/preparation.py`, `biofuzz/molecules/mutator.py`, `biofuzz/oracle/affinity.py`, `biofuzz/oracle/selectivity.py`, `biofuzz/protein/residues.py`, `biofuzz/protein/pocket.py`, and `biofuzz/storage/findings.py`.
+- Verified the workspace is on `develop`, confirmed `.venv` is present, and ran `./.venv/bin/python .agent/tools/runtime_audit.py`.
+- Ran `./.venv/bin/python -m pytest tests -q`.
+- Confirmed the target assets and seed corpus inventory, including `targets/hiv_protease/reference_ligands/indinavir.pdbqt` and `seeds/zinc_druglike_10k.smi` with 10,000 entries.
+- Executed a direct phase check script covering Phase 1 preparation, Phase 2 docking, Phase 3 parsing, Phase 4 coverage fingerprinting, and Phase 5 oracle evaluation against the checked-in HIV protease target.
+- Executed `./.venv/bin/python main.py --target hiv_protease --max-iterations 1 --workers 1 --output runs/smoke_cli_2026_03_29_current_build_request` to confirm the live main loop path still runs end-to-end.
+- Recorded the request outcome in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md`.
+
+Outcome:
+- Verification status: `52 passed`.
+- Runtime status: `live_run_ready: True` with repo-local `vina` resolved from `.agent/tools/bin/vina`.
+- Direct phase-check results: aspirin preparation returned PDBQT with `TORSDOF`; reference indinavir docking succeeded with best affinity `-10.05 kcal/mol`; pose parsing returned `48` atoms; coverage fingerprint contacted `11` pocket residues; oracle verdict returned `is_hit=True` with `passed_tiers=['affinity', 'strain']`.
+- One-iteration CLI run completed successfully with `iterations=1`, `hits=0`, `coverage_ratio=0.375`, `corpus_size=10000`, and `best_affinity=-8.77`.
+- Implementation status: the current repository already satisfies `BIOFUZZ_STRUCTURE.md`; no new BioFuzz source-code changes were necessary for this request.

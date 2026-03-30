@@ -1,0 +1,29 @@
+Task: Review `.agent/AGENTS.md` and build BioFuzz as defined by `BIOFUZZ_STRUCTURE.md` in the current live workspace.
+
+Challenges:
+- The repository already matched the documented module layout, so the remaining gaps were runtime and fixture quality rather than missing source files.
+- The workspace had Python chemistry dependencies available in `.venv`, but no supported docking binary was installed system-wide.
+- The checked-in `targets/hiv_protease/reference_ligands/indinavir.pdbqt` and `targets/hiv_protease/protein.pdbqt` were placeholder fixtures, which prevented the documented reference-docking milestone from succeeding with a realistic affinity score.
+- Existing unit tests assumed that binary discovery only used `PATH`, so adding a repo-local fallback needed targeted regression updates.
+
+Approaches considered:
+1. Stop at another verification-only pass and report that the repository structure already matched the spec.
+2. Install an official AutoDock Vina release into the repository itself and teach the runtime to discover repo-local tool binaries without requiring a system package manager.
+3. Replace the placeholder HIV protease docking fixtures with real prepared assets so the spec's reference docking flow succeeds end-to-end in the current workspace.
+
+Successful approach:
+- Followed approaches 2 and 3 together.
+- Added `.agent/tools/install_vina.py` to download the official AutoDock Vina release into `.agent/tools/bin/vina`.
+- Updated `biofuzz.docking.runner` and `.agent/tools/runtime_audit.py` to discover supported docking binaries from the repo-local tool directory in addition to normal `PATH` resolution.
+- Added a regression test for repo-local binary discovery and isolated existing tests from the new fallback path.
+- Replaced the placeholder `targets/hiv_protease/reference_ligands/indinavir.pdbqt` with a real Meeko-prepared ligand generated from the checked-in `indinavir.smi` reference.
+- Prepared a real HIV protease receptor from RCSB structure `1HSG` using `.venv/bin/mk_prepare_receptor.py`, replaced `targets/hiv_protease/protein.pdbqt`, and updated `targets/hiv_protease/config.py` to use the co-crystal ligand centroid as the docking-box center.
+- Updated `README.md` to document the validated local install-and-run path using the repo-local Vina installer.
+
+Verification:
+- `git branch --show-current` -> `develop`
+- `./.venv/bin/python -m pytest tests -q` -> `52 passed`
+- `./.venv/bin/python .agent/tools/runtime_audit.py` -> `live_run_ready: True`; `vina` resolved from `.agent/tools/bin/vina`
+- Phase 1 criterion -> aspirin preparation returned PDBQT containing `TORSDOF`
+- Reference docking flow -> `phase2_success: True`, `phase3_best_affinity: -9.936`, `phase3_pose_atoms: 48`, `phase4_new_bits: 10`
+- `./.venv/bin/python main.py --target hiv_protease --max-iterations 1 --workers 1 --output runs/smoke_cli_2026_03_30_real_vina_validation` -> successful completion with `iterations=1`, `hits=0`, `coverage_ratio=0.20833333333333334`, `corpus_size=10000`, `best_affinity=-8.625`

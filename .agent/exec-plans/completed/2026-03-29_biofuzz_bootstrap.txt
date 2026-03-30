@@ -1,0 +1,22 @@
+Task: Build BioFuzz end-to-end from BIOFUZZ_STRUCTURE.md
+
+Challenges:
+- Repository started nearly empty; all modules and scaffolding had to be created from scratch.
+- BioFuzz depends on heavy external runtime tools (RDKit/Meeko/Gnina) that may not exist in all environments.
+- Needed deterministic tests that validate architecture while remaining robust when optional dependencies are missing.
+
+Approach:
+1. Created the complete package layout and module skeletons matching the design doc.
+2. Implemented each phase component:
+   - Molecule filtering/preparation (RDKit + optional Meeko + fallback PDBQT writer)
+   - Docking wrapper + parser
+   - Protein residue parser + pocket fingerprinting + coverage map
+   - Oracle tiers (affinity/strain/selectivity)
+   - Corpus priority queue + persistence
+   - Mutation engine (operations 1-3)
+   - Main fuzzer loop with checkpointing and multiprocessing docking
+3. Added CLI entrypoint (`main.py`), target config, seed corpus, scripts, and global config.
+4. Wrote phase-aligned tests and executed pytest.
+
+Successful completion:
+- `python3 -m pytest -q` passed with environment-aware skips for missing RDKit-dependent tests.

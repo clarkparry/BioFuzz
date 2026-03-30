@@ -1,0 +1,31 @@
+Task: Review `.agent/AGENTS.md` and build BioFuzz as defined by `BIOFUZZ_STRUCTURE.md` on the live workspace.
+
+Challenges:
+- Earlier request logs showed repeated confirmation passes, but the current prompt required a fresh build-oriented audit rather than trusting prior `.agent/` history.
+- The repository structure already matched the spec, so the remaining build problems were environmental and packaging-related rather than missing modules.
+- `pip install -r requirements.txt` first failed because the repo still referenced `rdkit-pypi`, which no longer resolves here for Python 3.12.
+- After switching to a local `.venv`, the Meeko preparation path still failed because `meeko` imported only partially; its runtime dependencies `scipy` and `gemmi` were not declared in the repo requirements.
+- The runtime audit tool gave a false positive because it only checked module discoverability, not whether importing the module actually worked.
+
+Approaches considered:
+- Keep treating the repository as already built and only record another confirmation pass.
+- Fix the Python packaging path in the repository so the documented preparation phase can be exercised locally from a reproducible virtualenv.
+
+Successful approach:
+- Re-read `.agent/AGENTS.md` and re-audited the live workspace directly against `BIOFUZZ_STRUCTURE.md`.
+- Created a local `.venv` because system `pip` is externally managed in this environment.
+- Updated `requirements.txt` to replace `rdkit-pypi` with `rdkit` and to explicitly add `scipy` plus `gemmi` so Meeko can import and prepare ligands successfully.
+- Added `.venv/` to `.gitignore` to keep the repo clean after the local build.
+- Hardened `.agent/tools/runtime_audit.py` to import Python modules instead of only checking `find_spec`, preventing false-positive dependency reports.
+- Updated `README.md` so the repository-status section documents the validated `.venv`-based verification path.
+
+Validation:
+- `.venv/bin/pip install -r requirements.txt` completed successfully.
+- `.venv/bin/python -m pytest tests -v` passed with `51 passed`.
+- `.venv/bin/python .agent/tools/runtime_audit.py` reported `PyYAML`, `RDKit`, and `Meeko` as available; only docking binaries remain unavailable.
+- `.venv/bin/python main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_user_state_latest_3_venv_final` completed successfully.
+- `.venv/bin/python -c "from biofuzz.molecules.preparation import prepare_smiles; ..."` satisfied the Phase 1 criterion and printed `Phase 1 OK`.
+
+Outcome:
+- BioFuzz is now reproducibly buildable in a repo-local Python 3.12 virtual environment and satisfies the documented Phase 1 preparation criterion in addition to the existing repository-structure checks.
+- The remaining blocker for live non-zero fuzzing runs is external to the repository: no supported docking binary (`gnina`, `vina`, `quickvina2`, or `quickvina-w`) is installed on this machine.

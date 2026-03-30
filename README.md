@@ -22,6 +22,32 @@
 
 ---
 
+## Repository Status
+
+The repository is implemented to the layout and phase structure described in `BIOFUZZ_STRUCTURE.md` and is currently being tracked on the `develop` branch.
+
+The validated local verification path in this workspace is:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python .agent/tools/install_vina.py
+.venv/bin/python -m pytest tests -v
+.venv/bin/python .agent/tools/runtime_audit.py
+.venv/bin/python main.py --target hiv_protease --max-iterations 1 --workers 1
+```
+
+Notes for this machine:
+
+- Use `python3`; there is no `python` alias in the current workspace.
+- `requirements.txt` now uses the current `rdkit` package name and explicitly declares `scipy` plus `gemmi`, so a local Python 3.12 virtualenv can install a working RDKit/Meeko preparation stack.
+- `.agent/tools/install_vina.py` downloads the official AutoDock Vina release into `.agent/tools/bin/vina`, and the docking runner/runtime audit now discover repo-local binaries there in addition to normal `PATH` lookups.
+- The unit test suite, the Phase 1 preparation check, the runtime audit, the documented reference-ligand docking flow, and a one-iteration CLI run all succeed locally from `.venv` after installing the local Vina binary.
+- New run state is checkpointed under `runs/<stamp>_<target>/corpus/state.json` with a mirrored legacy `corpus.json` snapshot kept for resume compatibility.
+- BioFuzz still prefers a system `gnina`/`vina`/`quickvina2`/`quickvina-w` when one exists, but no longer depends on a system-wide installation for local verification.
+
+---
+
 ## Concept Overview
 
 BioFuzz is a coverage-guided molecular exploration framework modeled directly on the principles of feedback-directed fuzzing (à la AFL/libFuzzer), applied to the domain of computational drug discovery.

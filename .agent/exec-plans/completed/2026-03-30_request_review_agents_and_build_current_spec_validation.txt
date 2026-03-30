@@ -1,0 +1,23 @@
+Task: Review `.agent/AGENTS.md` and validate the current BioFuzz workspace against `BIOFUZZ_STRUCTURE.md`.
+
+Challenges:
+- Confirm the live repository still matches the documented phase/module split instead of relying on earlier validation notes.
+- Distinguish repository completeness from runtime-environment limitations.
+- Record the current request in the required tracking artifacts without disturbing unrelated workspace changes.
+
+Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+- Audit the current package tree, target assets, scripts, and key runtime modules against the documented structure.
+- Run the available verification path: branch check, test suite, runtime audit, and zero-iteration CLI smoke run.
+- Patch any concrete mismatches discovered during the audit.
+
+Completed Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`, then re-audited the live package layout plus the key runtime modules in `main.py`, `biofuzz/core/fuzzer.py`, `biofuzz/docking/config.py`, `biofuzz/docking/runner.py`, `biofuzz/molecules/preparation.py`, `biofuzz/oracle/affinity.py`, and `biofuzz/oracle/selectivity.py`.
+- Confirmed the repository still matches the documented structure and phase split, so no new BioFuzz source-code changes were required for this request.
+- Re-verified the live tree with `git branch --show-current`, `pytest tests -q`, `python3 .agent/tools/runtime_audit.py`, and `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_review_agents_and_build_current_validation_2`.
+
+Outcome:
+- Branch status: `develop`.
+- Verification status: `41 passed, 10 skipped` and a successful zero-iteration CLI smoke run with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=10000`, and `best_affinity=0.0`.
+- Runtime audit: `PyYAML` available; `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in the current workspace.
+- Remaining blocker: the repository is built to spec, but live non-zero chemistry and docking runs remain environment-blocked until the chemistry/runtime toolchain is installed.

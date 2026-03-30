@@ -1,0 +1,22 @@
+Task: Review `.agent/AGENTS.md` and build/validate the current BioFuzz workspace against `BIOFUZZ_STRUCTURE.md` for the current user state request with a fresh smoke-run output directory.
+
+Challenges:
+- Validate the live workspace directly instead of relying on the large chain of earlier `.agent/` confirmations.
+- Distinguish repository completeness from local-environment limits so the request can be closed accurately.
+- Avoid resume ambiguity by using a new smoke-run output directory rather than a previously used path.
+
+Approaches Considered:
+- Rebuild BioFuzz modules from the structure document even if the live repository already matched it.
+- Perform a direct live audit of the current implementation, rerun the validation path with a fresh output directory, and only change source files if a concrete mismatch is found.
+
+Successful Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+- Audited the live repository inventory plus the current runtime modules, including `main.py`, `biofuzz/core/fuzzer.py`, `biofuzz/core/corpus.py`, `biofuzz/core/coverage.py`, `biofuzz/docking/config.py`, `biofuzz/docking/runner.py`, `biofuzz/docking/parser.py`, `biofuzz/molecules/preparation.py`, `biofuzz/molecules/mutator.py`, `biofuzz/oracle/affinity.py`, `biofuzz/oracle/selectivity.py`, `biofuzz/protein/residues.py`, and `biofuzz/protein/pocket.py`.
+- Re-verified the workspace with `git branch --show-current`, `python3 -m pytest tests -v`, `python3 .agent/tools/runtime_audit.py`, and `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_review_agents_and_build_current_user_state_fresh`.
+- Confirmed that the fresh smoke run produced `coverage.json`, `corpus/state.json`, and the mirrored `corpus.json` under the documented run layout.
+- Updated the required `.agent/` tracking files with the results of this request-specific validation pass.
+
+Outcome:
+- Verification status: `41 passed, 10 skipped` and a successful zero-iteration CLI smoke run with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=10000`, and `best_affinity=0.0`.
+- Implementation status: the current repository already matches `BIOFUZZ_STRUCTURE.md`, including the documented package tree, target fixtures, scripts, configuration, and runtime modules for phases 1-10.
+- Remaining blocker: `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` are unavailable in this workspace, so live non-zero chemistry/docking execution remains environment-blocked rather than code-blocked.

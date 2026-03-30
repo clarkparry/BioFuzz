@@ -1,0 +1,24 @@
+Task: Review `.agent/AGENTS.md`, validate the current BioFuzz workspace directly against `BIOFUZZ_STRUCTURE.md`, and record the final request-scoped build status.
+
+Challenges:
+- Confirm the live repository state directly instead of relying on the long chain of prior `.agent/` validation records.
+- Distinguish between repository completeness and the local chemistry/runtime toolchain, because the latter still gates non-zero docking runs.
+- Update the required tracking artifacts without disturbing unrelated source work in the already-dirty tree.
+
+Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+- Re-audit the current entrypoint and key runtime modules that implement the documented build phases.
+- Run the validated local verification path: `git branch --show-current`, `pytest tests -v`, `python3 .agent/tools/runtime_audit.py`, and `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_final_validation`.
+- Record the outcome in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md`.
+
+Completed Approach:
+- Re-read `.agent/AGENTS.md` and re-audited the live BioFuzz tree directly against `BIOFUZZ_STRUCTURE.md`.
+- Re-read `main.py`, `biofuzz/core/fuzzer.py`, `biofuzz/molecules/preparation.py`, `biofuzz/docking/runner.py`, `biofuzz/docking/config.py`, `biofuzz/docking/parser.py`, `biofuzz/protein/pocket.py`, and `biofuzz/oracle/affinity.py` to confirm the documented phase split and runtime interfaces still match the current implementation.
+- Re-verified the workspace with `git branch --show-current` (`develop`), `pytest tests -v` (`40 passed, 10 skipped`), `python3 .agent/tools/runtime_audit.py`, and `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_final_validation`.
+
+Outcome:
+- Branch status: `develop`.
+- Verification status: `40 passed, 10 skipped`.
+- Smoke status: zero-iteration CLI run completed successfully with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=10000`, and `best_affinity=0.0`.
+- Runtime status: `live_run_ready: False`; `PyYAML` available; `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in this workspace.
+- Conclusion: the repository is already built to `BIOFUZZ_STRUCTURE.md`; the only remaining blocker for live non-zero docking runs is the missing local chemistry/runtime toolchain.

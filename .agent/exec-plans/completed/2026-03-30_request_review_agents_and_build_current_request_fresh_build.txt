@@ -1,0 +1,27 @@
+Task: Review `.agent/AGENTS.md` and confirm that the live BioFuzz workspace is built according to `BIOFUZZ_STRUCTURE.md` with a fresh request-scoped validation artifact.
+
+Challenges:
+- The repository was already in a dirty working state with extensive prior request tracking, so this pass had to validate the live tree directly without disturbing existing work.
+- A prior smoke-run path for this request already existed, so the validation needed a new output directory to avoid resume ambiguity.
+- The chemistry runtime stack is still absent on this machine, which means validation must keep distinguishing code completeness from environment readiness.
+
+Approaches considered:
+- Rebuild or refactor project modules again from the structure document.
+- Perform a direct AGENTS/spec audit, rerun the supported verification path with a fresh smoke-run directory, and update only the `.agent` tracking artifacts if the implementation already matches the spec.
+
+Approach used:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+- Re-audited the current BioFuzz package layout plus the key runtime modules that implement phases 1-10.
+- Re-verified the workspace with the test suite, the runtime audit tool, and a zero-iteration CLI smoke run into a new output directory.
+- Recorded the outcome in the `.agent` tracking files instead of changing working BioFuzz source code unnecessarily.
+
+Outcome:
+- The repository already matches `BIOFUZZ_STRUCTURE.md` in the current live workspace.
+- No BioFuzz source edits were required for this request.
+- The only remaining blocker for live non-zero fuzzing runs is still the missing local chemistry/runtime toolchain (`RDKit`, `Meeko`, and a supported docking binary).
+
+Validation:
+- `python3 -m pytest -q` -> `41 passed, 10 skipped`
+- `python3 .agent/tools/runtime_audit.py` -> `live_run_ready: False`; `PyYAML` available; `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable
+- `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_current_request_build_fresh_2` -> successful completion with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=10000`, `best_affinity=0.0`
+- Output audit -> confirmed `runs/smoke_cli_2026_03_30_current_request_build_fresh_2/{coverage.json,corpus/state.json,corpus.json}`

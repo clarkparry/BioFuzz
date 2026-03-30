@@ -1,0 +1,22 @@
+Task: Review `.agent/AGENTS.md`, validate the current BioFuzz workspace against `BIOFUZZ_STRUCTURE.md`, and record the exact current build/runtime status for this request.
+
+Challenges:
+- Confirm the current workspace state directly instead of relying on the long chain of earlier validation records.
+- Separate repository completeness from local runtime readiness, because chemistry-heavy phases depend on external Python packages and docking binaries.
+- Keep the update limited to required project-tracking artifacts when no BioFuzz implementation gap is present.
+
+Approaches Considered:
+- Trust prior request logs and only summarize the existing state.
+- Re-audit the live tree, rerun the current verification path, and update `.agent` tracking artifacts with fresh results.
+
+Successful Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`, then inspect the current package layout and key runtime modules.
+- Re-run the available verification path with `git branch --show-current`, `pytest -q`, `python3 .agent/tools/runtime_audit.py`, and `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_review_agents_and_build_current_runtime_snapshot`.
+- Record the outcome in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md` because the repository is already built to the documented structure.
+
+Outcome:
+- Branch status: `develop`.
+- Verification status: `40 passed, 10 skipped`.
+- Smoke status: zero-iteration CLI run completed successfully with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=10000`, and `best_affinity=0.0`.
+- Runtime status: `live_run_ready: False`; `PyYAML` available; `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in this workspace.
+- Conclusion: BioFuzz is built to the structure spec in the repository; the only remaining blocker for live non-zero docking runs is installing the local chemistry/runtime toolchain.

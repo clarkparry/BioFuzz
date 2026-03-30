@@ -1,0 +1,22 @@
+Task: Review .agent/AGENTS.md and validate/build BioFuzz against BIOFUZZ_STRUCTURE.md.
+
+Challenges:
+- Separate actual implementation gaps from environment-only blockers.
+- Preserve existing user/agent work in a dirty tree.
+- Record request-scoped validation in the repo tracking files without rewriting prior history.
+
+Approach:
+- Re-read .agent/AGENTS.md and BIOFUZZ_STRUCTURE.md.
+- Audit the live codebase against the documented package structure and runtime interfaces.
+- Patch any concrete mismatches discovered.
+- Run the available verification path (tests, branch check, CLI smoke run, dependency audit).
+
+Completed Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`, then re-audited the live package layout, target fixtures, scripts, and key runtime modules.
+- Confirmed the implementation already matches the documented phases, so no BioFuzz source-code changes were needed for this request.
+- Re-verified the live tree with `git branch --show-current`, `pytest -q`, `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_review_agents_and_build_biofuzz`, and a runtime dependency audit.
+
+Outcome:
+- Branch status: `develop`.
+- Verification status: `39 passed, 10 skipped` and a successful zero-iteration CLI smoke run (`iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=6`, `best_affinity=0.0`).
+- Remaining blocker: `rdkit`, `meeko`, and all supported docking binaries are not installed in this workspace, so chemistry-heavy milestones remain environment-blocked rather than code-blocked.

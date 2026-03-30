@@ -1,0 +1,26 @@
+Task: Review `.agent/AGENTS.md` and confirm the current BioFuzz workspace is built according to `BIOFUZZ_STRUCTURE.md` for this request.
+
+Challenges:
+- Validate the live tree directly instead of relying on earlier request summaries.
+- Confirm the implementation still matches the documented phase structure without rebuilding already-correct modules.
+- Separate repository completeness from the local environment's missing chemistry and docking runtime dependencies.
+
+Approaches considered:
+- Rebuild or refactor BioFuzz modules preemptively. Rejected because the repository already contains the documented package tree, targets, scripts, configuration, and tests.
+- Perform a fresh AGENTS/spec audit plus current verification of the live workspace. Chosen because it gives a traceable request-level confirmation with minimal risk.
+
+Successful approach:
+- Reviewed `.agent/AGENTS.md` and followed its task-tracking and reporting requirements.
+- Re-audited `BIOFUZZ_STRUCTURE.md` against the current repository layout and key runtime modules, including `main.py`, `biofuzz/core/fuzzer.py`, `biofuzz/molecules/preparation.py`, `biofuzz/docking/runner.py`, `biofuzz/core/corpus.py`, `biofuzz/core/coverage.py`, and the oracle/protein/storage modules.
+- Re-ran the current verification path with `git branch --show-current`, `pytest -q`, a fresh zero-iteration CLI smoke run, and a runtime dependency audit.
+- Recorded the outcome in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md`.
+
+Validation:
+- `git branch --show-current` -> `develop`
+- `pytest -q` -> `39 passed, 10 skipped`
+- `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_29_user_request_fresh` -> successful completion with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=6`, `best_affinity=0.0`
+- Dependency audit -> `yaml` available; `rdkit`, `meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in the current workspace
+
+Outcome:
+- No BioFuzz source-code edits were required for this request because the current implementation already matches the structure spec and passes the available validation suite.
+- Full chemistry/docking milestone execution remains blocked by missing runtime dependencies in this workspace rather than by missing implementation work.

@@ -1,0 +1,23 @@
+Task: Review `.agent/AGENTS.md` and validate the current BioFuzz workspace against `BIOFUZZ_STRUCTURE.md` for the current session.
+
+Challenges:
+- Reconfirm the live repository directly instead of relying on earlier `.agent/` request logs.
+- Separate repository completeness from local runtime-toolchain availability.
+- Record the outcome in the required planning files without making speculative source changes to already-complete BioFuzz modules.
+
+Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`.
+- Audit the current entrypoint and key runtime modules against the documented phase split.
+- Run the current verification path: branch check, test suite, runtime dependency audit, and zero-iteration CLI smoke run.
+- Record the outcome in `.agent/USER.md`, `.agent/PLANS.md`, and `.agent/PHASES.md`.
+
+Completed Approach:
+- Re-read `.agent/AGENTS.md` and re-audited `main.py`, `biofuzz/core/fuzzer.py`, `biofuzz/molecules/preparation.py`, `biofuzz/docking/runner.py`, `biofuzz/docking/config.py`, and `biofuzz/oracle/affinity.py` against `BIOFUZZ_STRUCTURE.md`.
+- Re-verified the current repository with `git branch --show-current`, `python3 -m pytest -q`, `python3 .agent/tools/runtime_audit.py`, and `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_review_agents_and_build_current_session`.
+- Updated the required `.agent/` tracking files with a request-scoped record of the audit and verification results.
+
+Outcome:
+- Branch status: `develop`.
+- Verification status: `40 passed, 10 skipped` and a successful zero-iteration CLI smoke run with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=6`, and `best_affinity=0.0`.
+- Implementation status: the repository still contains the documented package layout, runtime modules, targets, scripts, configuration, and tests for phases 1-10.
+- Remaining blocker: `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` are unavailable in this workspace, so chemistry-heavy phases remain environment-blocked rather than code-blocked.

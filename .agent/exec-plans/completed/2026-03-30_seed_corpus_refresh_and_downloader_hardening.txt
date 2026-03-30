@@ -1,0 +1,23 @@
+Task: Review `.agent/AGENTS.md`, validate/build the live BioFuzz workspace against `BIOFUZZ_STRUCTURE.md`, and fix any concrete structure mismatch found during the audit.
+
+Challenges:
+- Distinguish between repeated validation noise in `.agent/` and an actual repository gap that still mattered to the spec.
+- Replace the placeholder seed corpus without relying on the stale ZINC20 `drug-like.smi` URL that the existing downloader used.
+- Keep the downloader resilient to the current ZINC20 export behavior, which paginates aggressively and intermittently returns transient proxy/server failures.
+
+Approaches Considered:
+- Leave the repository as-is and only record another validation pass.
+- Fix the seed corpus/tooling mismatch directly by refreshing the default corpus from a live ZINC20 export and hardening the downloader around the current endpoint behavior.
+
+Successful Approach:
+- Re-read `.agent/AGENTS.md` and `BIOFUZZ_STRUCTURE.md`, then audit the live implementation and repository assets.
+- Identify the concrete mismatch: `seeds/zinc_druglike_10k.smi` was still a six-entry development placeholder and `scripts/download_zinc.py` pointed at an obsolete ZINC20 URL.
+- Update `scripts/download_zinc.py` to use a live official ZINC20 subset export, send an explicit user-agent, paginate in smaller requests, retry transient page failures, and print per-page progress.
+- Refresh `seeds/zinc_druglike_10k.smi` to a real 10,000-entry ZINC-derived corpus and rerun the verification path.
+
+Outcome:
+- Source change: `scripts/download_zinc.py` now downloads from the live ZINC20 export path with pagination, retries, and streaming writes instead of loading a stale endpoint into memory.
+- Asset change: `seeds/zinc_druglike_10k.smi` now contains 10,000 seed entries instead of a small placeholder subset.
+- Verification status: `python3 -m pytest tests -v` -> `40 passed, 10 skipped`.
+- Smoke status: `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_seed_refresh` completed successfully with `corpus_size=10000`.
+- Remaining blocker: `RDKit`, `Meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` are still unavailable in this workspace, so live non-zero chemistry/docking runs remain environment-blocked rather than repository-blocked.

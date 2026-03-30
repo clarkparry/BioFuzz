@@ -1,0 +1,28 @@
+# Global defaults -- overridden per target
+docking:
+  exhaustiveness_fuzz: 4
+  exhaustiveness_confirm: 16
+  num_modes: 3
+  engine: gnina
+
+oracle:
+  affinity_threshold: -9.0
+  strain_threshold: 3.5
+  selectivity_ratio_min: 2.0
+
+molecules:
+  max_mw: 550
+  max_logp: 5.0
+  max_rot_bonds: 10
+  mutations_per_entry: 20
+
+corpus:
+  max_size: 50000
+  priority_new_bit_weight: 10.0
+  priority_affinity_weight: 1.0
+  priority_reuse_penalty: 0.1
+
+fuzzer:
+  workers: 4
+  checkpoint_every: 500
+  log_level: INFO
