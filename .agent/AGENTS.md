@@ -2,8 +2,7 @@
 The file "BIOFUZZ_STRUCTURE.md" is the detailed guide to executing this project. The file "README.md" describe the general overview. The README.md can be changed to better depict the project overview. **Do not change BIOFUZZ_STRUCTURE.md.**
 
 ### Agent - User Interaction
-- You are an autonomous agent in an automated pipeline.
-- The .agent/USER.md file is where the agent can communicate to the user. Dcisions or suggestions about the project should be recorded here. **DO NOT WAIT FOR A RESPONSE**. If you have a suggestion within the general scope of the project, **execute it without asking** and record the decision in this file. If the suggestion is far beyond the scope of the project, make a suggestion and continue. Again, **NEVER WAIT FOR A RESPONSE**.
+- The .agent/USER.md file is where the agent can communicate to the user about design choices. This is only for medium-large design changes or configuration changes. Decisions or suggestions about the project should be recorded here. **DO NOT WAIT FOR A RESPONSE**. If you have a suggestion within the general scope of the project, **execute it without asking** and record the decision in this file. If the suggestion is far beyond the scope of the project, make a suggestion and continue. Again, **NEVER WAIT FOR A RESPONSE**.
 - Keep preambles to a single declarative sentence ("I'm scanning the repo and then drafting a minimal fix.") — no approval requests.
 - Do not ask for permission.
 

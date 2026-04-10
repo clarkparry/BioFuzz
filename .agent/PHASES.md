@@ -261,6 +261,35 @@ Validation performed:
 - Inventory audit -> confirmed `targets/hiv_protease/{config.py,protein.pdbqt,reference_ligands/indinavir.smi,reference_ligands/indinavir.pdbqt}` and `scripts/{download_zinc.py,prep_protein.sh,visualize_hit.py}` are present
 - Dependency audit -> `yaml` available; `rdkit`, `meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in the current workspace
 
+## Phase Summary: Persistent Scheduler, Power Schedule, TUI, And Expanded Targets
+
+This phase turned BioFuzz from a bounded queue processor into a more AFL-like live fuzzer. The main loop now keeps running until interrupted, requeues previously seen corpus entries instead of draining them away, deduplicates corpus members by SMILES, and applies a simple power schedule so entries that found new coverage, better affinities, or hits receive larger future mutation budgets. A throttled TTY-only TUI now surfaces the same scheduler and docking telemetry during live runs without changing non-TTY behavior.
+
+The biggest engineering challenge was making the new runtime semantics fit the existing architecture cleanly. The corpus had to remain checkpointable and resumable while changing from a one-shot priority queue into a persistent structure, the loop needed to count confirmation and selectivity docks accurately for the runtime UI, and the new progress plumbing could not make the test suite brittle. The target-expansion work had a different challenge: generating real receptor PDBQT/config/reference assets reproducibly instead of checking in hand-built examples. To solve that, I added `.agent/tools/prepare_target_fixture.py` and used it to derive receptor chains, ligand-centered docking boxes, pocket residue lists, and reference ligand assets from known co-crystal structures.
+
+Validation performed:
+
+- `.venv/bin/python -m pytest tests -q` -> `58 passed`
+- `.venv/bin/python .agent/tools/runtime_audit.py` -> `live_run_ready: True`
+- Local Vina sanity docks for new bundled targets -> `egfr_kinase -7.161`, `parp1 -12.15`, `sars_cov2_mpro -8.344`, `braf_v600e -10.09` kcal/mol
+- `.venv/bin/python main.py --target egfr_kinase --engine vina --seeds /tmp/biofuzz_smoke_seed.smi --mutations-per-entry 1 --max-iterations 1 --workers 1 --output runs/smoke_cli_2026_04_10_scheduler_tui_egfr` -> successful one-iteration live run
+
+## Phase Summary: Live CLI Regression Coverage
+
+This phase turned the previously manual live-run validation into a repeatable regression in the normal test suite. BioFuzz already had a working `.venv` runtime, a repo-local Vina binary, and checked-in HIV protease assets, but the real one-iteration CLI path was still protected only by ad hoc smoke commands and `.agent/` notes. I added a bounded subprocess regression in `tests/test_main.py` that launches `main.py` against the checked-in `hiv_protease` target with a single phenol seed, asserts the run completes one real docking iteration, and verifies the expected checkpoint files are written.
+
+The main challenge was keeping the regression high-signal without making it brittle. The live docking path depends on RDKit, Meeko, and a resolved Vina binary, so the test had to skip cleanly when that runtime is unavailable while still exercising the actual CLI, preparation, docking, checkpointing, and output-reporting path when it is present. I kept the run bounded to one iteration and one mutation budget so it stays fast enough for routine `pytest` use, then updated `README.md` to make it clear that the normal verification path now covers a real end-to-end docking execution when the runtime toolchain is installed.
+
+Validation performed:
+
+- `.venv/bin/python -m pytest tests/test_main.py -q` -> `5 passed in 2.14s`
+- `.venv/bin/python -m pytest tests -q` -> `60 passed in 2.44s`
+- `.venv/bin/python .agent/tools/runtime_audit.py` -> `live_run_ready: True`; repo-local `vina` resolved from `.agent/tools/bin/vina`
+
+## Future Work
+
+The next useful hardening step is to add a similarly bounded live regression for the multiprocessing path (`--workers 2`) once a low-runtime fixture strategy is pinned down. That would extend protection from the one-worker CLI loop to the parallel docking path as well; the main challenge is keeping process startup and docking variability low enough that the test remains fast and stable for everyday `pytest` runs.
+
 ## Phase Summary: Current Workspace Runtime Audit
 
 This request again asked for a review of `.agent/AGENTS.md` and for BioFuzz to be built according to `BIOFUZZ_STRUCTURE.md`. A fresh workspace audit again found that the repository already satisfies the documented package layout, targets, scripts, configuration, entrypoint, and runtime module split, so the BioFuzz implementation itself did not need new functional source changes.

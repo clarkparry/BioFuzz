@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from biofuzz.docking.config import TargetConfig
 from biofuzz.docking.parser import parse_log
@@ -15,11 +16,14 @@ def _best_affinity(
     exhaustiveness: int = 8,
     num_modes: int = 3,
     engine: str = "gnina",
+    dock_observer: Callable[[], None] | None = None,
 ) -> float | None:
     prepared_ligand = ligand_pdbqt or prepare_smiles(smiles)
     if prepared_ligand is None:
         return None
 
+    if dock_observer is not None:
+        dock_observer()
     result = dock(
         prepared_ligand,
         target_config,
@@ -73,6 +77,7 @@ def _selectivity_ratio(
     exhaustiveness: int = 8,
     num_modes: int = 3,
     engine: str = "gnina",
+    dock_observer: Callable[[], None] | None = None,
 ) -> float | None:
     target_score = target_affinity
     if target_score is None:
@@ -83,6 +88,7 @@ def _selectivity_ratio(
             exhaustiveness=exhaustiveness,
             num_modes=num_modes,
             engine=engine,
+            dock_observer=dock_observer,
         )
     offtarget_affinity = _best_affinity(
         smiles,
@@ -91,6 +97,7 @@ def _selectivity_ratio(
         exhaustiveness=exhaustiveness,
         num_modes=num_modes,
         engine=engine,
+        dock_observer=dock_observer,
     )
 
     if target_score is None or offtarget_affinity is None:
@@ -110,6 +117,7 @@ def selectivity_ratio_from_target(
     exhaustiveness: int = 8,
     num_modes: int = 3,
     engine: str = "gnina",
+    dock_observer: Callable[[], None] | None = None,
 ) -> float | None:
     offtarget = _offtarget_config(target_config)
     if offtarget is None:
@@ -123,4 +131,5 @@ def selectivity_ratio_from_target(
         exhaustiveness=exhaustiveness,
         num_modes=num_modes,
         engine=engine,
+        dock_observer=dock_observer,
     )

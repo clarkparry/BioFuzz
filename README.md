@@ -32,9 +32,9 @@ The validated local verification path in this workspace is:
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python .agent/tools/install_vina.py
-.venv/bin/python -m pytest tests -v
+.venv/bin/python -m pytest tests -q
 .venv/bin/python .agent/tools/runtime_audit.py
-.venv/bin/python main.py --target hiv_protease --max-iterations 1 --workers 1
+.venv/bin/python main.py --target egfr_kinase --engine vina --max-iterations 1 --mutations-per-entry 1 --workers 1
 ```
 
 Notes for this machine:
@@ -42,9 +42,26 @@ Notes for this machine:
 - Use `python3`; there is no `python` alias in the current workspace.
 - `requirements.txt` now uses the current `rdkit` package name and explicitly declares `scipy` plus `gemmi`, so a local Python 3.12 virtualenv can install a working RDKit/Meeko preparation stack.
 - `.agent/tools/install_vina.py` downloads the official AutoDock Vina release into `.agent/tools/bin/vina`, and the docking runner/runtime audit now discover repo-local binaries there in addition to normal `PATH` lookups.
-- The unit test suite, the Phase 1 preparation check, the runtime audit, the documented reference-ligand docking flow, and a one-iteration CLI run all succeed locally from `.venv` after installing the local Vina binary.
+- The unit test suite, runtime audit, bundled reference-ligand docking checks, and a one-iteration CLI run all succeed locally from `.venv` after installing the repo-local Vina binary.
+- `pytest` now includes a bounded live CLI regression against the checked-in `hiv_protease` target when RDKit, Meeko, and Vina are available, so the real end-to-end docking path is exercised during normal verification instead of only through ad hoc smoke commands.
 - New run state is checkpointed under `runs/<stamp>_<target>/corpus/state.json` with a mirrored legacy `corpus.json` snapshot kept for resume compatibility.
+- The main loop now behaves like a persistent AFL-style queue: by default it keeps running until the user presses `Ctrl-C`, requeues previously seen corpus entries, and uses a power schedule to spend larger mutation budgets on inputs with better novelty/affinity/find history.
+- A low-overhead terminal UI is enabled automatically on TTY runs and shows the current target, total docks, docks/sec, corpus size, finds, GPU status, scheduler power, mutation stage/type, best affinity, and checkpoint count.
+- Bundled prepared targets now include `hiv_protease`, `egfr_kinase`, `parp1`, `sars_cov2_mpro`, and `braf_v600e`, each with a checked-in receptor `protein.pdbqt`, `config.py`, and reference inhibitor files.
 - BioFuzz still prefers a system `gnina`/`vina`/`quickvina2`/`quickvina-w` when one exists, but no longer depends on a system-wide installation for local verification.
+
+### Runtime Behavior
+
+- `main.py` runs indefinitely when `--max-iterations` is omitted. Stop the fuzzer with `Ctrl-C`; BioFuzz saves checkpoints before exiting and reports the final counters.
+- `mutations_per_entry` is now the base mutation budget, not a hard cap. The power schedule scales that budget up for interesting entries so coverage-expanding and high-affinity molecules get more mutation time.
+- The corpus is deduplicated by SMILES and requeued after each pass, which prevents the queue from draining after the first corpus sweep and keeps high-value molecules available for future mutation cycles.
+
+Example live run:
+
+```bash
+.venv/bin/python main.py --target parp1 --engine vina
+# runs until Ctrl-C, checkpoints on interrupt, and shows the AFL-style TUI on a TTY
+```
 
 ---
 
@@ -373,9 +390,10 @@ pdbqt_string = preparator.write_pdbqt_string()
 
 ### ADFRsuite
 **Role**: Protein preparation for docking.  
-**Key script**: `prepare_receptor4.py` — removes water, adds hydrogens, assigns charges, outputs protein PDBQT.  
+BioFuzz now ships `.agent/tools/prepare_target_fixture.py`, which downloads co-crystal structures, strips the chosen receptor chain, derives a docking box from the bound ligand, computes pocket residues, and then uses Meeko's `mk_prepare_receptor.py` to emit the checked-in receptor PDBQT.  
+
 ```bash
-prepare_receptor4.py -r protein.pdb -o protein_prepared.pdbqt -A hydrogens
+.venv/bin/python .agent/tools/prepare_target_fixture.py egfr_kinase parp1
 ```
 
 ---
@@ -405,11 +423,12 @@ for smiles in seed_corpus:
 
 ```python
 while True:
-    # Dequeue
-    molecule = corpus.pop_highest_priority()
+    # Persistent AFL-style queue selection
+    entry = corpus.pop_highest_priority()
+    power = power_schedule(entry)  # scales the mutation budget for interesting cases
     
-    # Mutate
-    mutants = mutation_engine.mutate(molecule, n=20)
+    # Mutate with an energy budget derived from novelty + affinity + finds
+    mutants = mutation_engine.mutate(entry, n=power.budget)
     
     for mutant in mutants:
         # Prepare
@@ -436,6 +455,9 @@ while True:
         if result.affinity <= AFFINITY_THRESHOLD:
             if selectivity_oracle(mutant):
                 findings.save(mutant, result)
+
+    # Requeue the parent so fuzzing keeps running until the user interrupts it
+    corpus.requeue(entry)
 ```
 
 ### Step 3: Triage
@@ -461,24 +483,24 @@ For all molecules in `findings`:
 | `MAX_MOL_WEIGHT` | `550` | Maximum molecular weight (Da) |
 | `MAX_LOGP` | `5.0` | Maximum lipophilicity |
 | `MAX_ROT_BONDS` | `10` | Maximum rotatable bonds |
-| `MUTATIONS_PER_MOLECULE` | `20` | Mutants generated per corpus entry |
+| `MUTATIONS_PER_MOLECULE` | `20` | Base mutation budget per corpus entry; the power schedule can raise this for interesting inputs |
 | `CORPUS_SIZE_LIMIT` | `50000` | Max molecules in active corpus |
 
 ---
 
 ## Recommended Starting Targets
 
-These targets are recommended for initial development because they have well-validated binding sites, available crystal structures with co-crystallized ligands (allowing ground-truth verification), and known inhibitors to benchmark against.
+These targets are checked into `targets/` today with prepared receptor PDBQTs, co-crystal-derived box coordinates, pocket residue sets, and known-inhibitor reference ligands.
 
-| Target | PDB ID | Disease | Known Inhibitor |
-|---|---|---|---|
-| SARS-CoV-2 Main Protease (Mpro) | 6LU7 | COVID-19 | Nirmatrelvir (Paxlovid) |
-| HIV-1 Protease | 1HVR | HIV/AIDS | Indinavir, Saquinavir |
-| EGFR Kinase | 1IEP | Non-small cell lung cancer | Erlotinib, Gefitinib |
-| *M. tuberculosis* InhA | 1P44 | Tuberculosis | Isoniazid |
-| Thrombin | 1PPB | Thrombosis | Dabigatran |
+| BioFuzz Target | Source PDB | Disease Area | Bundled Inhibitor | Local Vina Sanity Check |
+|---|---|---|---|---|
+| `hiv_protease` | 1HVR | HIV/AIDS | Indinavir | validated previously in-repo |
+| `egfr_kinase` | 1M17 | Non-small cell lung cancer | Erlotinib | `-7.16 kcal/mol` |
+| `parp1` | 4UND | DNA repair / oncology | Talazoparib | `-12.15 kcal/mol` |
+| `sars_cov2_mpro` | 7SI9 | COVID-19 | Nirmatrelvir | `-8.34 kcal/mol` |
+| `braf_v600e` | 3OG7 | Melanoma / MAPK signaling | Vemurafenib | `-10.09 kcal/mol` |
 
-Start with **HIV-1 Protease (1HVR)**. It has one of the most thoroughly characterized binding sites in structural biology, dozens of known inhibitors across a wide affinity range, and it is the canonical example in both the Vina documentation and most docking tutorials.
+Start with **`hiv_protease`** or **`egfr_kinase`** if you want the smallest path to a live local run. Move to **`parp1`**, **`sars_cov2_mpro`**, and **`braf_v600e`** once you want a broader set of benchmark pockets and inhibitor chemotypes.
 
 ---
 

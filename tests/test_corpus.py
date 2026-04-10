@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 
 from biofuzz.core.corpus import Corpus, CorpusEntry
-from biofuzz.core.fuzzer import compute_priority, compute_priority_weighted
+from biofuzz.core.fuzzer import (
+    compute_mutation_budget,
+    compute_power_score,
+    compute_priority,
+    compute_priority_weighted,
+)
 
 
 def _entry(smiles: str, priority: float) -> CorpusEntry:
@@ -72,3 +77,34 @@ def test_compute_priority_weighted_uses_overrides() -> None:
     )
     # (3 * 5.0) + ((8 - 5) * 2.0) - (4 * 0.25)
     assert score == pytest.approx(20.0)
+
+
+def test_corpus_deduplicates_entries_by_smiles() -> None:
+    corpus = Corpus()
+    corpus.add(CorpusEntry(smiles="CCO", source_id="seed_1", priority=1.0, new_bits=1))
+    corpus.add(CorpusEntry(smiles="CCO", source_id="mutant_of:seed_1", priority=7.5, best_affinity=-9.1))
+
+    assert corpus.size() == 1
+    entry = corpus.pop()
+    assert entry.smiles == "CCO"
+    assert entry.priority == pytest.approx(7.5)
+    assert entry.new_bits == 1
+    assert entry.best_affinity == pytest.approx(-9.1)
+
+
+def test_power_schedule_increases_budget_for_interesting_entries() -> None:
+    boring = CorpusEntry(smiles="CCO", source_id="seed", priority=1.0)
+    interesting = CorpusEntry(
+        smiles="CCN",
+        source_id="seed",
+        priority=15.0,
+        best_affinity=-10.5,
+        new_bits=3,
+        finds=1,
+    )
+
+    boring_power, boring_budget = compute_mutation_budget(boring, 20)
+    interesting_power, interesting_budget = compute_mutation_budget(interesting, 20)
+
+    assert interesting_power > compute_power_score(boring)
+    assert interesting_budget > boring_budget

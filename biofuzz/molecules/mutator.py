@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import random
 
 try:
@@ -8,6 +9,13 @@ except ImportError:  # pragma: no cover - handled by runtime behavior
     Chem = None  # type: ignore[assignment]
 
 from biofuzz.molecules.filters import is_drug_like
+
+
+@dataclass(frozen=True)
+class MutationCandidate:
+    smiles: str
+    stage: str
+    mutation_type: str
 
 
 def _sanitize_and_smiles(mol) -> str | None:
@@ -93,6 +101,33 @@ def mutate(
     max_hba: int = 10,
     max_rot_bonds: int = 10,
 ) -> list[str]:
+    return [
+        candidate.smiles
+        for candidate in mutate_with_metadata(
+            smiles,
+            n=n,
+            seed=seed,
+            min_mw=min_mw,
+            max_mw=max_mw,
+            max_logp=max_logp,
+            max_hbd=max_hbd,
+            max_hba=max_hba,
+            max_rot_bonds=max_rot_bonds,
+        )
+    ]
+
+
+def mutate_with_metadata(
+    smiles: str,
+    n: int = 20,
+    seed: int | None = None,
+    min_mw: float = 0.0,
+    max_mw: float = 550.0,
+    max_logp: float = 5.0,
+    max_hbd: int = 5,
+    max_hba: int = 10,
+    max_rot_bonds: int = 10,
+) -> list[MutationCandidate]:
     if n <= 0 or Chem is None:
         return []
 
@@ -103,15 +138,19 @@ def mutate(
     rng = random.Random(seed)
     start_smiles = Chem.MolToSmiles(base, canonical=True)
 
-    operations = [atom_type_swap, add_substituent, remove_substituent]
-    mutants: set[str] = set()
+    operations = [
+        ("atom_type_swap", atom_type_swap),
+        ("add_substituent", add_substituent),
+        ("remove_substituent", remove_substituent),
+    ]
+    mutants: dict[str, MutationCandidate] = {}
 
     attempts = 0
     max_attempts = max(100, n * 30)
 
     while len(mutants) < n and attempts < max_attempts:
         attempts += 1
-        op = rng.choice(operations)
+        mutation_type, op = rng.choice(operations)
         working = Chem.Mol(base)
         mutated = op(working, rng)
         if mutated is None:
@@ -132,6 +171,13 @@ def mutate(
         ):
             continue
 
-        mutants.add(candidate)
+        mutants.setdefault(
+            candidate,
+            MutationCandidate(
+                smiles=candidate,
+                stage="havoc",
+                mutation_type=mutation_type,
+            ),
+        )
 
-    return sorted(mutants)
+    return [mutants[key] for key in sorted(mutants)]

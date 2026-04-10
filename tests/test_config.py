@@ -144,3 +144,23 @@ def test_apply_global_defaults_preserves_explicit_default_oracle_values() -> Non
     assert merged.oracle.affinity_threshold == -9.0
     assert merged.oracle.strain_threshold == 2.5
     assert merged.oracle.selectivity_ratio_min == 3.0
+
+
+def test_bundled_targets_load_with_prepared_assets() -> None:
+    expected_targets = {
+        "hiv_protease": ("indinavir.smi", "indinavir.pdbqt"),
+        "egfr_kinase": ("erlotinib.smi", "erlotinib.pdbqt"),
+        "parp1": ("talazoparib.smi", "talazoparib.pdbqt"),
+        "sars_cov2_mpro": ("nirmatrelvir.smi", "nirmatrelvir.pdbqt"),
+        "braf_v600e": ("vemurafenib.smi", "vemurafenib.pdbqt"),
+    }
+
+    for target_name, reference_files in expected_targets.items():
+        cfg = load_target_config(target_name)
+        target_dir = Path("targets") / target_name
+
+        assert cfg.name == target_name
+        assert Path(cfg.receptor).exists()
+        assert target_dir.joinpath("config.py").exists()
+        for filename in reference_files:
+            assert target_dir.joinpath("reference_ligands", filename).exists()

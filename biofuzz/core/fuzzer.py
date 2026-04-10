@@ -3,14 +3,17 @@ from __future__ import annotations
 from multiprocessing import Pool
 from pathlib import Path
 import json
+import time
 from typing import Callable
 
 from biofuzz.core.corpus import Corpus, CorpusEntry
 from biofuzz.core.coverage import CoverageMap
+from biofuzz.core.tui import RuntimeStatus
 from biofuzz.docking.config import TargetConfig
 from biofuzz.docking.parser import parse_log, parse_pose
 from biofuzz.docking.runner import DockingResult, dock
-from biofuzz.molecules.mutator import mutate
+from biofuzz.molecules import mutator as mutator_module
+from biofuzz.molecules.mutator import MutationCandidate, mutate, mutate_with_metadata
 from biofuzz.molecules.preparation import prepare_smiles
 from biofuzz.oracle.affinity import evaluate
 from biofuzz.protein.pocket import compute_fingerprint
@@ -56,6 +59,98 @@ def compute_priority_weighted(
         (new_bits * priority_new_bit_weight)
         + (max(0.0, -affinity - 5.0) * priority_affinity_weight)
         - (times_mutated * priority_reuse_penalty)
+    )
+
+
+def score_corpus_entry(
+    entry: CorpusEntry,
+    priority_new_bit_weight: float = 10.0,
+    priority_affinity_weight: float = 1.0,
+    priority_reuse_penalty: float = 0.1,
+) -> float:
+    affinity = entry.best_affinity if entry.best_affinity is not None else -5.0
+    find_bonus = float(entry.finds * 5)
+    return max(
+        0.1,
+        compute_priority_weighted(
+            new_bits=entry.new_bits,
+            affinity=affinity,
+            times_mutated=entry.times_mutated,
+            priority_new_bit_weight=priority_new_bit_weight,
+            priority_affinity_weight=priority_affinity_weight,
+            priority_reuse_penalty=priority_reuse_penalty,
+        )
+        + find_bonus,
+    )
+
+
+def compute_power_score(entry: CorpusEntry) -> float:
+    affinity = entry.best_affinity if entry.best_affinity is not None else -5.0
+    affinity_bonus = max(0.0, -affinity - 5.0)
+    return max(
+        1.0,
+        1.0
+        + (entry.new_bits * 2.0)
+        + affinity_bonus
+        + (entry.finds * 6.0)
+        - (entry.times_mutated * 0.2),
+    )
+
+
+def compute_mutation_budget(entry: CorpusEntry, base_mutations: int) -> tuple[float, int]:
+    power_score = compute_power_score(entry)
+    factor = 1.0
+    if power_score >= 24.0:
+        factor = 3.0
+    elif power_score >= 12.0:
+        factor = 2.0
+    elif power_score >= 6.0:
+        factor = 1.5
+    budget = max(1, int(round(base_mutations * factor)))
+    return power_score, budget
+
+
+def _mutate_candidates(
+    smiles: str,
+    n: int,
+    min_mw: float,
+    max_mw: float,
+    max_logp: float,
+    max_hbd: int,
+    max_hba: int,
+    max_rot_bonds: int,
+) -> list[MutationCandidate]:
+    if mutate is not mutator_module.mutate:
+        legacy_mutants = mutate(
+            smiles,
+            n=n,
+            min_mw=min_mw,
+            max_mw=max_mw,
+            max_logp=max_logp,
+            max_hbd=max_hbd,
+            max_hba=max_hba,
+            max_rot_bonds=max_rot_bonds,
+        )
+        return [
+            candidate
+            if isinstance(candidate, MutationCandidate)
+            else MutationCandidate(
+                smiles=str(candidate),
+                stage="havoc",
+                mutation_type="legacy_mutate",
+            )
+            for candidate in legacy_mutants
+        ]
+
+    return mutate_with_metadata(
+        smiles,
+        n=n,
+        min_mw=min_mw,
+        max_mw=max_mw,
+        max_logp=max_logp,
+        max_hbd=max_hbd,
+        max_hba=max_hba,
+        max_rot_bonds=max_rot_bonds,
     )
 
 
@@ -124,13 +219,57 @@ def run(
     priority_affinity_weight: float = 1.0,
     priority_reuse_penalty: float = 0.1,
     logger: Callable[[str], None] | None = None,
-) -> dict[str, float | int]:
+    progress_callback: Callable[[RuntimeStatus], None] | None = None,
+) -> dict[str, float | int | str]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
     def log(message: str) -> None:
         if logger:
             logger(message)
+
+    start_time = time.monotonic()
+
+    def elapsed_seconds() -> float:
+        return max(0.0, time.monotonic() - start_time)
+
+    current_stage = "init"
+    current_mutation_stage = "-"
+    current_mutation_type: str | None = None
+    current_parent: str | None = None
+    current_smiles: str | None = None
+    current_power_score = 1.0
+    current_budget = mutations_per_entry
+    checkpoint_count = 0
+    total_docks = 0
+
+    def emit_progress(force_stage: str | None = None) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            RuntimeStatus(
+                stage=force_stage or current_stage,
+                mutation_stage=current_mutation_stage,
+                mutation_type=current_mutation_type,
+                current_parent=current_parent,
+                current_smiles=current_smiles,
+                power_score=current_power_score,
+                mutation_budget=current_budget,
+                total_docks=total_docks,
+                docks_per_sec=(total_docks / elapsed_seconds()) if total_docks else 0.0,
+                corpus_size=corpus.size(),
+                finds=hits,
+                coverage_ratio=cov_map.coverage_ratio(),
+                best_affinity=best_affinity,
+                checkpoints=checkpoint_count,
+                elapsed_seconds=elapsed_seconds(),
+            )
+        )
+
+    def observe_extra_dock() -> None:
+        nonlocal total_docks
+        total_docks += 1
+        emit_progress()
 
     corpus = Corpus(max_size=max_corpus_size)
     cov_map = CoverageMap(target_config.pocket.residue_ids)
@@ -181,6 +320,9 @@ def run(
             "hits": 0,
             "coverage_ratio": cov_map.coverage_ratio(),
             "corpus_size": 0,
+            "best_affinity": 0.0,
+            "total_docks": 0,
+            "stopped_reason": "empty_corpus",
         }
 
     protein_residues = {}
@@ -193,6 +335,7 @@ def run(
     iterations = 0
     hits = 0
     best_affinity: float | None = None
+    stopped_reason = "completed"
     selectivity_exhaustiveness = max(
         8,
         exhaustiveness_confirm if exhaustiveness_confirm is not None else exhaustiveness,
@@ -201,28 +344,56 @@ def run(
     pool = Pool(processes=workers) if workers > 1 else None
 
     try:
-        while corpus.size() > 0:
+        emit_progress()
+        while True:
             if max_iterations is not None and iterations >= max_iterations:
+                stopped_reason = "max_iterations"
+                break
+            if corpus.size() == 0:
+                stopped_reason = "empty_corpus"
                 break
 
             entry = corpus.pop()
             entry.times_mutated += 1
+            entry.priority = score_corpus_entry(
+                entry,
+                priority_new_bit_weight=priority_new_bit_weight,
+                priority_affinity_weight=priority_affinity_weight,
+                priority_reuse_penalty=priority_reuse_penalty,
+            )
 
-            mutants = mutate(
+            current_stage = "mutate"
+            current_parent = entry.smiles
+            current_smiles = None
+            current_mutation_type = None
+            current_power_score, current_budget = compute_mutation_budget(entry, mutations_per_entry)
+            current_mutation_stage = "havoc"
+            emit_progress()
+
+            mutants = _mutate_candidates(
                 entry.smiles,
-                n=mutations_per_entry,
-                min_mw=molecule_min_mw,
-                max_mw=molecule_max_mw,
-                max_logp=molecule_max_logp,
-                max_hbd=molecule_max_hbd,
-                max_hba=molecule_max_hba,
-                max_rot_bonds=molecule_max_rot_bonds,
+                current_budget,
+                molecule_min_mw,
+                molecule_max_mw,
+                molecule_max_logp,
+                molecule_max_hbd,
+                molecule_max_hba,
+                molecule_max_rot_bonds,
             )
             if not mutants:
+                corpus.add(entry)
+                emit_progress("idle")
                 continue
 
-            prepared: list[tuple[str, str]] = []
-            for smiles in mutants:
+            prepared: list[tuple[MutationCandidate, str]] = []
+            for candidate in mutants:
+                current_stage = "prepare"
+                current_smiles = candidate.smiles
+                current_mutation_stage = candidate.stage
+                current_mutation_type = candidate.mutation_type
+                emit_progress()
+
+                smiles = candidate.smiles
                 cached = cache.get(smiles)
                 if cached is None:
                     pdbqt = prepare_smiles(
@@ -238,15 +409,21 @@ def run(
                         continue
                     cache.set(smiles, pdbqt)
                     cached = pdbqt
-                prepared.append((smiles, cached))
+                prepared.append((candidate, cached))
 
             if not prepared:
+                corpus.add(entry)
+                emit_progress("idle")
                 continue
+
+            total_docks += len(prepared)
+            current_stage = "dock"
+            emit_progress()
 
             if pool is not None:
                 jobs = [
                     (pdbqt, target_config, exhaustiveness, num_modes, engine)
-                    for _smiles, pdbqt in prepared
+                    for _candidate, pdbqt in prepared
                 ]
                 results = pool.map(_dock_worker, jobs)
             else:
@@ -258,11 +435,16 @@ def run(
                         num_modes=num_modes,
                         engine=engine,
                     )
-                    for _smiles, pdbqt in prepared
+                    for _candidate, pdbqt in prepared
                 ]
 
             stop_after_batch = False
-            for (smiles, pdbqt), result in zip(prepared, results):
+            for (candidate, pdbqt), result in zip(prepared, results):
+                smiles = candidate.smiles
+                current_smiles = smiles
+                current_mutation_stage = candidate.stage
+                current_mutation_type = candidate.mutation_type
+
                 if max_iterations is not None and iterations >= max_iterations:
                     _cleanup_pose_path(result.pose_path)
                     stop_after_batch = True
@@ -291,6 +473,9 @@ def run(
                     new_bits = cov_map.update(fingerprint)
                     affinity = modes[0].affinity
 
+                    current_stage = "oracle"
+                    emit_progress()
+
                     verdict = evaluate(
                         modes,
                         pose_text,
@@ -300,6 +485,7 @@ def run(
                         selectivity_exhaustiveness=selectivity_exhaustiveness,
                         num_modes=num_modes,
                         docking_engine=engine,
+                        dock_observer=observe_extra_dock,
                     )
                     if verdict.is_hit:
                         confirmed_verdict = verdict
@@ -307,6 +493,9 @@ def run(
                         confirmed_pose_path = result.pose_path
 
                         if exhaustiveness_confirm is not None and exhaustiveness_confirm > 0:
+                            total_docks += 1
+                            current_stage = "confirm"
+                            emit_progress()
                             confirm_result = dock(
                                 pdbqt,
                                 target_config,
@@ -331,6 +520,7 @@ def run(
                                                 selectivity_exhaustiveness=selectivity_exhaustiveness,
                                                 num_modes=num_modes,
                                                 docking_engine=engine,
+                                                dock_observer=observe_extra_dock,
                                             )
                                             confirmed_pose_path = confirm_result.pose_path
                             finally:
@@ -349,23 +539,21 @@ def run(
                         elif confirmed_pose_path and confirmed_pose_path != result.pose_path:
                             _cleanup_pose_path(confirmed_pose_path)
 
-                    priority = compute_priority_weighted(
+                    child_entry = CorpusEntry(
+                        smiles=smiles,
+                        source_id=f"mutant_of:{entry.source_id}",
+                        priority=0.1,
+                        best_affinity=affinity,
                         new_bits=len(new_bits),
-                        affinity=affinity,
-                        times_mutated=entry.times_mutated,
+                        finds=1 if verdict.is_hit else 0,
+                    )
+                    child_entry.priority = score_corpus_entry(
+                        child_entry,
                         priority_new_bit_weight=priority_new_bit_weight,
                         priority_affinity_weight=priority_affinity_weight,
                         priority_reuse_penalty=priority_reuse_penalty,
                     )
-                    corpus.add(
-                        CorpusEntry(
-                            smiles=smiles,
-                            source_id=f"mutant_of:{entry.source_id}",
-                            priority=priority,
-                            best_affinity=affinity,
-                            new_bits=len(new_bits),
-                        )
-                    )
+                    corpus.add(child_entry)
 
                     if best_affinity is None or affinity < best_affinity:
                         best_affinity = affinity
@@ -373,10 +561,16 @@ def run(
                     if checkpoint_every > 0 and iterations % checkpoint_every == 0:
                         cov_map.save(coverage_checkpoint)
                         _save_corpus_checkpoints(corpus, corpus_checkpoint_paths)
+                        checkpoint_count += 1
+                        current_stage = "checkpoint"
+                        emit_progress()
                 finally:
                     _cleanup_pose_path(result.pose_path)
 
+            corpus.add(entry)
+
             if stop_after_batch:
+                stopped_reason = "max_iterations"
                 break
 
             if checkpoint_every > 0 and iterations % checkpoint_every == 0:
@@ -384,6 +578,12 @@ def run(
                     "[CHKPT] iterations={} coverage={:.3f} corpus={} hits={}"
                     .format(iterations, cov_map.coverage_ratio(), corpus.size(), hits)
                 )
+            current_stage = "idle"
+            emit_progress()
+
+    except KeyboardInterrupt:
+        stopped_reason = "keyboard_interrupt"
+        log("[STOP] interrupted by user; saving checkpoints")
 
     finally:
         if pool is not None:
@@ -392,6 +592,10 @@ def run(
 
     cov_map.save(coverage_checkpoint)
     _save_corpus_checkpoints(corpus, corpus_checkpoint_paths)
+    if iterations > 0 or corpus.size() > 0:
+        checkpoint_count += 1
+    current_stage = "finished"
+    emit_progress()
 
     return {
         "iterations": iterations,
@@ -399,4 +603,6 @@ def run(
         "coverage_ratio": cov_map.coverage_ratio(),
         "corpus_size": corpus.size(),
         "best_affinity": best_affinity if best_affinity is not None else 0.0,
+        "total_docks": total_docks,
+        "stopped_reason": stopped_reason,
     }

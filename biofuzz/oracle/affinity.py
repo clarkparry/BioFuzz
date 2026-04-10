@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 from typing import Sequence
 
 from biofuzz.docking.config import OracleConfig, TargetConfig
@@ -36,6 +37,7 @@ def evaluate(
     selectivity_exhaustiveness: int = 8,
     num_modes: int = 3,
     docking_engine: str = "gnina",
+    dock_observer: Callable[[], None] | None = None,
 ) -> OracleVerdict:
     oracle_cfg = _oracle_config(config)
     affinity = modes[0].affinity if modes else float("inf")
@@ -74,6 +76,7 @@ def evaluate(
             exhaustiveness=selectivity_exhaustiveness,
             num_modes=num_modes,
             engine=docking_engine,
+            dock_observer=dock_observer,
         )
         if ratio is None:
             notes.append("Selectivity skipped: target/off-target docking unavailable")

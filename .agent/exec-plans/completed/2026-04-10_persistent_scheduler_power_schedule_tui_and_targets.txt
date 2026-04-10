@@ -1,0 +1,28 @@
+Task: Implement the current user request by making BioFuzz run until interrupted, adding an AFL-style power schedule, adding a low-overhead AFL++-style TUI, and shipping more real prepared target examples with valid receptor/config assets.
+
+Challenges:
+- Change the corpus behavior from a draining priority queue into a persistent AFL-style queue without regressing checkpoint/resume behavior.
+- Add a power schedule that materially biases time toward interesting inputs while keeping the implementation simple and the current tests understandable.
+- Surface live scheduler and docking metrics in a terminal UI without adding heavy per-dock overhead or noisy non-TTY output.
+- Prepare additional target fixtures from real structures so each target has a valid receptor PDBQT, box coordinates, and known-inhibitor reference assets.
+
+Approach:
+- Rework the corpus/fuzzer interaction so entries persist across queue cycles, are deduplicated by SMILES, and are re-scored after use instead of being consumed permanently.
+- Add explicit mutation metadata plus a power-schedule function so interesting entries receive larger mutation budgets and expose those same metrics to the runtime UI.
+- Introduce a throttled text TUI for TTY runs, wire it into the existing CLI/fuzzer callbacks, and keep normal logging behavior for non-TTY runs and tests.
+- Generate and validate a small set of additional known target fixtures from co-crystal structures, then update README plus `.agent/` tracking files to document the new runtime behavior and assets.
+
+Completed Approach:
+- Reworked `biofuzz/core/corpus.py` into a persistent, deduplicated corpus keyed by SMILES so entries are requeued instead of being drained permanently, while preserving checkpoint/save-load behavior.
+- Added mutation metadata plus a lightweight power schedule in `biofuzz/core/fuzzer.py` so interesting entries receive larger mutation budgets, total dock counts include confirmation/selectivity work, and `Ctrl-C` now stops the run cleanly after saving checkpoints.
+- Added a TTY-only AFL-style runtime UI in `biofuzz/core/tui.py` and wired it through `main.py` so live runs surface target, dock throughput, corpus size, finds, GPU status, mutation stage/type, power score, and checkpoint telemetry with throttled refreshes.
+- Built `.agent/tools/prepare_target_fixture.py` and used it to add checked-in prepared targets for EGFR kinase (`1M17` / erlotinib), PARP1 (`4UND` / talazoparib), SARS-CoV-2 Mpro (`7SI9` / nirmatrelvir), and BRAF V600E (`3OG7` / vemurafenib), each with receptor PDBQT, config, and reference ligand assets.
+- Added regression coverage for corpus deduplication, power-schedule bias, persistent queue cycling, selectivity dock accounting, TUI rendering, and bundled target assets; then updated `README.md` to document the new runtime semantics and fixture inventory.
+
+Outcome:
+- Source change: BioFuzz now runs indefinitely by default until interrupted, preserves and reuses its corpus AFL-style, applies a power schedule to interesting inputs, and shows a low-overhead AFL-inspired TUI on TTY runs.
+- Asset change: the repository now ships five prepared example targets (`hiv_protease`, `egfr_kinase`, `parp1`, `sars_cov2_mpro`, `braf_v600e`) with valid receptor/config/reference files checked in.
+- Verification status: `.venv/bin/python -m pytest tests -q` -> `58 passed`.
+- Runtime audit: `.venv/bin/python .agent/tools/runtime_audit.py` -> `live_run_ready: True` with repo-local `vina`.
+- Docking validation: bundled reference ligands dock successfully on the new targets (`egfr_kinase -7.161`, `parp1 -12.15`, `sars_cov2_mpro -8.344`, `braf_v600e -10.09` kcal/mol in local Vina sanity checks).
+- CLI smoke status: `.venv/bin/python main.py --target egfr_kinase --engine vina --seeds /tmp/biofuzz_smoke_seed.smi --mutations-per-entry 1 --max-iterations 1 --workers 1 --output runs/smoke_cli_2026_04_10_scheduler_tui_egfr` completed successfully with `iterations=1`, `corpus_size=2`, and `total_docks=1`.
