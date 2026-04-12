@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import signal
+
+import pytest
 
 from biofuzz.docking.config import BoxConfig
 from biofuzz.docking import runner
@@ -72,3 +75,28 @@ def test_dock_supports_receptor_path_keyword(monkeypatch, tmp_path: Path) -> Non
 
     assert result.success
     assert result.pose_path is not None
+
+
+def test_dock_raises_keyboard_interrupt_when_process_exits_via_sigint(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    receptor = tmp_path / "receptor.pdbqt"
+    receptor.write_text("RECEPTOR", encoding="utf-8")
+    box = BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0)
+
+    monkeypatch.setattr(runner, "_resolve_binary", lambda engine: "/usr/bin/mock")
+
+    class InterruptedResult:
+        returncode = -signal.SIGINT
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(runner.subprocess, "run", lambda *args, **kwargs: InterruptedResult())
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.dock(
+            ligand_pdbqt="ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00   0.00 C\n",
+            receptor_path=str(receptor),
+            box=box,
+        )

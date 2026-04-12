@@ -1,5 +1,5 @@
 ### BioFuzz
-The file "BIOFUZZ_STRUCTURE.md" is the detailed guide to executing this project. The file "README.md" describe the general overview. The README.md can be changed to better depict the project overview. **Do not change BIOFUZZ_STRUCTURE.md.**
+The file "BIOFUZZ\_STRUCTURE.md" is the detailed guide to executing this project. The file "README.md" describe the general overview. The README.md can be changed to better depict the project overview. **Do not change BIOFUZZ_STRUCTURE.md.**
 
 ### Agent - User Interaction
 - The .agent/USER.md file is where the agent can communicate to the user about design choices. This is only for medium-large design changes or configuration changes. Decisions or suggestions about the project should be recorded here. **DO NOT WAIT FOR A RESPONSE**. If you have a suggestion within the general scope of the project, **execute it without asking** and record the decision in this file. If the suggestion is far beyond the scope of the project, make a suggestion and continue. Again, **NEVER WAIT FOR A RESPONSE**.
@@ -16,3 +16,6 @@ Build any tools that may improve your efficiency and effectiveness in building t
 
 ### GitHub
 Build the project on a *develop* branch. The completion of a task or phase should be committed to the GitHub repository. Each phase should be built on their own branch before being pushed to the *develop* branch when completed. Upon completion of all phases, the project is complete on the *develop* branch and therefore should be pushed to *main*.
+
+### Testing
+Follow the "BIOFUZZ\_STRUCTURE.md" for testing details. Ensure regression tests are included for feature changes. 

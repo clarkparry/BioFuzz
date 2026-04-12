@@ -1,0 +1,24 @@
+Task: Change startup corpus behavior so BioFuzz docks seed inputs first, keeps only interesting seeds in the corpus, then proceeds with normal corpus-driven fuzzing.
+
+Challenges:
+- Preserve checkpoint resume behavior so existing corpus checkpoints still bypass seed ingestion.
+- Define seed "interestingness" without adding expensive selectivity confirmation during initial docking.
+- Update regression tests so seed docking is deterministic and does not depend on local docking binaries.
+
+Approach:
+- Replace the startup "add every seed with priority=1.0" block with a seed-docking bootstrap phase.
+- For each seed: prepare ligand, dock at fuzz exhaustiveness, parse pose/log, update coverage, evaluate oracle tiers without selectivity re-docking, and add only interesting seeds to the corpus.
+- Keep per-seed cache reuse, coverage accounting, and priority scoring aligned with the existing main fuzzing path.
+- Update fuzzer tests to mock seed docking explicitly and adjust expectations where the extra seed dock now contributes to totals.
+
+Completed Approach:
+- Implemented a seed docking stage in `biofuzz/core/fuzzer.py` that runs only when no corpus checkpoint is loaded.
+- Added seed gating rule: keep seeds only when they add new coverage bits or satisfy the affinity/strain oracle path.
+- Kept resume behavior intact and preserved corpus scoring using existing weighted priority functions.
+- Added a regression test ensuring non-interesting seeds are excluded from the initial corpus.
+- Updated existing tests for deterministic seed bootstrap docking and revised dock-count expectations.
+
+Outcome:
+- Startup no longer enqueues all seeds blindly; it now triages seeds through docking and builds a smaller, interesting-only initial corpus.
+- Corpus-based fuzzing still runs exactly as before after seed triage is complete.
+- Verification status: `pytest -q` -> `58 passed, 11 skipped`.

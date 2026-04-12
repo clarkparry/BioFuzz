@@ -6,6 +6,9 @@
 
 ## Completed
 
+- `2026-04-12_spam_ctrl_c_seed_abort_hardening.txt` — hardened spammed `Ctrl-C` behavior so seed-stage aborts follow the same graceful stop/report/checkpoint flow as regular fuzzing.
+- `2026-04-12_seed_stage_keyboard_interrupt_alignment.txt` — aligned seed-stage `Ctrl-C` abort handling with the regular fuzzing shutdown path so manual aborts save checkpoints and produce normal run summaries.
+- `2026-04-12_seed_docking_corpus_bootstrap.txt` — replaced startup seed-to-corpus bulk loading with docking-based seed triage so only interesting seeds enter the corpus before the normal fuzzing loop.
 - `2026-04-10_live_cli_regression_coverage.txt` — added a bounded live CLI regression against the checked-in HIV protease assets so `pytest` now protects the real one-iteration docking path when the runtime toolchain is present.
 - `2026-04-10_persistent_scheduler_power_schedule_tui_and_targets.txt` — implemented the persistent interrupt-driven scheduler, power schedule, AFL-style TUI, target-preparation tooling, and four additional prepared example targets, then re-verified the live runtime path.
 - `2026-03-30_request_review_agents_and_build_current_workspace_live_phase_validation.txt` — fresh AGENTS/spec audit of the current live `.venv` workspace with `52 passed`, `live_run_ready: True`, direct Phase 1-7 milestone checks, and successful one-worker plus two-worker CLI runs for this request.

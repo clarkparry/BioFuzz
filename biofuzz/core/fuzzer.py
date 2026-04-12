@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from multiprocessing import Pool
+from multiprocessing import Pool, TimeoutError as PoolTimeoutError
 from pathlib import Path
 import json
+import errno
+import signal
 import time
 from typing import Callable
 
@@ -154,15 +156,25 @@ def _mutate_candidates(
     )
 
 
-def _dock_worker(payload: tuple[str, TargetConfig, int, int, str]) -> DockingResult:
-    pdbqt, target_config, exhaustiveness, num_modes, engine = payload
-    return dock(
-        pdbqt,
-        target_config,
-        exhaustiveness=exhaustiveness,
-        num_modes=num_modes,
-        engine=engine,
-    )
+def _dock_worker(payload: tuple[int, str, TargetConfig, int, int, str]) -> tuple[int, DockingResult]:
+    idx, pdbqt, target_config, exhaustiveness, num_modes, engine = payload
+    try:
+        result = dock(
+            pdbqt,
+            target_config,
+            exhaustiveness=exhaustiveness,
+            num_modes=num_modes,
+            engine=engine,
+        )
+    except KeyboardInterrupt:
+        # Suppress worker tracebacks when the campaign is manually aborted.
+        result = DockingResult(
+            success=False,
+            log_text="",
+            pose_path=None,
+            error="Docking interrupted by user",
+        )
+    return idx, result
 
 
 def _cleanup_pose_path(pose_path: str | None) -> None:
@@ -304,27 +316,6 @@ def run(
             .format(primary_corpus_checkpoint, legacy_corpus_checkpoint, exc)
         )
 
-    if corpus.size() == 0:
-        for smiles, source_id in load_smiles(seed_smiles_path):
-            corpus.add(
-                CorpusEntry(
-                    smiles=smiles,
-                    source_id=source_id,
-                    priority=1.0,
-                )
-            )
-
-    if corpus.size() == 0:
-        return {
-            "iterations": 0,
-            "hits": 0,
-            "coverage_ratio": cov_map.coverage_ratio(),
-            "corpus_size": 0,
-            "best_affinity": 0.0,
-            "total_docks": 0,
-            "stopped_reason": "empty_corpus",
-        }
-
     protein_residues = {}
     receptor_path = Path(target_config.receptor)
     if receptor_path.exists():
@@ -336,16 +327,145 @@ def run(
     hits = 0
     best_affinity: float | None = None
     stopped_reason = "completed"
+    failure_reason: str | None = None
     selectivity_exhaustiveness = max(
         8,
         exhaustiveness_confirm if exhaustiveness_confirm is not None else exhaustiveness,
     )
-
     pool = Pool(processes=workers) if workers > 1 else None
+    pool_needs_terminate = False
+    previous_sigint_handler: int | Callable[[int, object], object] | None = None
+    sigint_suppressed = False
+
+    def suppress_sigint() -> None:
+        nonlocal previous_sigint_handler, sigint_suppressed
+        if sigint_suppressed:
+            return
+        try:
+            previous_sigint_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            sigint_suppressed = True
+        except ValueError:
+            sigint_suppressed = False
+
+    if corpus.size() == 0:
+        try:
+            seed_total = 0
+            seed_interesting = 0
+            log("[SEED] docking seeds to build initial corpus")
+            for smiles, source_id in load_smiles(seed_smiles_path):
+                seed_total += 1
+                current_stage = "seed_prepare"
+                current_parent = source_id
+                current_smiles = smiles
+                current_mutation_stage = "seed"
+                current_mutation_type = "seed"
+                emit_progress()
+
+                cached = cache.get(smiles)
+                if cached is None:
+                    pdbqt = prepare_smiles(
+                        smiles,
+                        min_mw=molecule_min_mw,
+                        max_mw=molecule_max_mw,
+                        max_logp=molecule_max_logp,
+                        max_hbd=molecule_max_hbd,
+                        max_hba=molecule_max_hba,
+                        max_rot_bonds=molecule_max_rot_bonds,
+                    )
+                    if pdbqt is None:
+                        continue
+                    cache.set(smiles, pdbqt)
+                    cached = pdbqt
+
+                current_stage = "seed_dock"
+                emit_progress()
+                result = dock(
+                    cached,
+                    target_config,
+                    exhaustiveness=exhaustiveness,
+                    num_modes=num_modes,
+                    engine=engine,
+                )
+                total_docks += 1
+                emit_progress("seed_dock")
+
+                if not result.success or not result.pose_path:
+                    _cleanup_pose_path(result.pose_path)
+                    continue
+
+                pose_file = Path(result.pose_path)
+                if not pose_file.exists():
+                    _cleanup_pose_path(result.pose_path)
+                    continue
+
+                try:
+                    pose_text = pose_file.read_text(encoding="utf-8")
+                    modes = parse_log(result.log_text)
+                    atoms = parse_pose(pose_text)
+                    if not modes or not atoms:
+                        continue
+
+                    fingerprint = compute_fingerprint(
+                        atoms,
+                        protein_residues,
+                        target_config.pocket,
+                    )
+                    new_bits = cov_map.update(fingerprint)
+                    affinity = modes[0].affinity
+
+                    current_stage = "seed_oracle"
+                    emit_progress()
+                    verdict = evaluate(modes, pose_text, target_config.oracle)
+
+                    if best_affinity is None or affinity < best_affinity:
+                        best_affinity = affinity
+
+                    if not new_bits and not verdict.is_hit:
+                        continue
+
+                    seed_entry = CorpusEntry(
+                        smiles=smiles,
+                        source_id=source_id,
+                        priority=0.1,
+                        best_affinity=affinity,
+                        new_bits=len(new_bits),
+                        finds=1 if verdict.is_hit else 0,
+                    )
+                    seed_entry.priority = score_corpus_entry(
+                        seed_entry,
+                        priority_new_bit_weight=priority_new_bit_weight,
+                        priority_affinity_weight=priority_affinity_weight,
+                        priority_reuse_penalty=priority_reuse_penalty,
+                    )
+                    corpus.add(seed_entry)
+                    seed_interesting += 1
+                finally:
+                    _cleanup_pose_path(result.pose_path)
+
+            log(
+                "[SEED] completed seed docking: total={} interesting={} corpus={}"
+                .format(seed_total, seed_interesting, corpus.size())
+            )
+        except KeyboardInterrupt:
+            stopped_reason = "keyboard_interrupt"
+            current_stage = "stopped"
+            suppress_sigint()
+            log("[STOP] manual quit requested (Ctrl-C); terminating workers and saving checkpoints")
+            pool_needs_terminate = True
+        except Exception as exc:
+            stopped_reason = "failed"
+            failure_reason = f"{type(exc).__name__}: {exc}"
+            current_stage = "failed"
+            log(f"[FAIL] campaign failed: {failure_reason}; terminating workers and saving checkpoints")
+            pool_needs_terminate = True
+
+    if corpus.size() == 0 and stopped_reason == "completed":
+        stopped_reason = "empty_corpus"
 
     try:
         emit_progress()
-        while True:
+        while stopped_reason == "completed":
             if max_iterations is not None and iterations >= max_iterations:
                 stopped_reason = "max_iterations"
                 break
@@ -416,27 +536,63 @@ def run(
                 emit_progress("idle")
                 continue
 
-            total_docks += len(prepared)
             current_stage = "dock"
             emit_progress()
 
             if pool is not None:
                 jobs = [
-                    (pdbqt, target_config, exhaustiveness, num_modes, engine)
-                    for _candidate, pdbqt in prepared
+                    (idx, pdbqt, target_config, exhaustiveness, num_modes, engine)
+                    for idx, (_candidate, pdbqt) in enumerate(prepared)
                 ]
-                results = pool.map(_dock_worker, jobs)
+                results_by_idx: list[DockingResult | None] = [None] * len(prepared)
+                iterator = pool.imap_unordered(_dock_worker, jobs)
+                pending = len(prepared)
+                while pending > 0:
+                    try:
+                        idx, result = iterator.next(timeout=0.2)
+                    except PoolTimeoutError:
+                        continue
+                    except (BrokenPipeError, EOFError) as exc:
+                        log(
+                            "[WARN] pool result channel closed during docking collection; "
+                            "treating as manual abort"
+                        )
+                        raise KeyboardInterrupt from exc
+                    except OSError as exc:
+                        if getattr(exc, "errno", None) != errno.EPIPE:
+                            raise
+                        log(
+                            "[WARN] pool result channel closed during docking collection; "
+                            "treating as manual abort"
+                        )
+                        raise KeyboardInterrupt from exc
+                    results_by_idx[idx] = result
+                    pending -= 1
+                    total_docks += 1
+                    candidate = prepared[idx][0]
+                    current_smiles = candidate.smiles
+                    current_mutation_stage = candidate.stage
+                    current_mutation_type = candidate.mutation_type
+                    emit_progress("dock")
+                if any(result is None for result in results_by_idx):
+                    raise RuntimeError("worker pool returned incomplete docking results")
+                results = [result for result in results_by_idx if result is not None]
             else:
-                results = [
-                    dock(
+                results = []
+                for candidate, pdbqt in prepared:
+                    result = dock(
                         pdbqt,
                         target_config,
                         exhaustiveness=exhaustiveness,
                         num_modes=num_modes,
                         engine=engine,
                     )
-                    for _candidate, pdbqt in prepared
-                ]
+                    results.append(result)
+                    total_docks += 1
+                    current_smiles = candidate.smiles
+                    current_mutation_stage = candidate.stage
+                    current_mutation_type = candidate.mutation_type
+                    emit_progress("dock")
 
             stop_after_batch = False
             for (candidate, pdbqt), result in zip(prepared, results):
@@ -583,21 +739,64 @@ def run(
 
     except KeyboardInterrupt:
         stopped_reason = "keyboard_interrupt"
-        log("[STOP] interrupted by user; saving checkpoints")
+        current_stage = "stopped"
+        suppress_sigint()
+        log("[STOP] manual quit requested (Ctrl-C); terminating workers and saving checkpoints")
+        pool_needs_terminate = True
+    except Exception as exc:
+        stopped_reason = "failed"
+        failure_reason = f"{type(exc).__name__}: {exc}"
+        current_stage = "failed"
+        log(f"[FAIL] campaign failed: {failure_reason}; terminating workers and saving checkpoints")
+        pool_needs_terminate = True
 
-    finally:
+    try:
         if pool is not None:
-            pool.close()
-            pool.join()
+            try:
+                try:
+                    if pool_needs_terminate:
+                        pool.terminate()
+                    else:
+                        pool.close()
+                except Exception as exc:
+                    log(f"[WARN] worker pool shutdown step failed: {type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    pool.join()
+                except Exception as exc:
+                    log(f"[WARN] worker pool join failed: {type(exc).__name__}: {exc}")
+        try:
+            cov_map.save(coverage_checkpoint)
+            _save_corpus_checkpoints(corpus, corpus_checkpoint_paths)
+            if iterations > 0 or corpus.size() > 0:
+                checkpoint_count += 1
+        except Exception as exc:
+            if stopped_reason == "keyboard_interrupt":
+                log(
+                    "[WARN] failed to save final checkpoints after manual abort: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                stopped_reason = "failed"
+                failure_reason = f"{type(exc).__name__}: {exc}"
+                current_stage = "failed"
+                log(f"[FAIL] failed to save final checkpoints: {failure_reason}")
+    finally:
+        if sigint_suppressed:
+            try:
+                signal.signal(signal.SIGINT, previous_sigint_handler)
+            except ValueError:
+                pass
 
-    cov_map.save(coverage_checkpoint)
-    _save_corpus_checkpoints(corpus, corpus_checkpoint_paths)
-    if iterations > 0 or corpus.size() > 0:
-        checkpoint_count += 1
-    current_stage = "finished"
+    if stopped_reason == "failed":
+        current_stage = "failed"
+    elif stopped_reason == "keyboard_interrupt":
+        current_stage = "stopped"
+    else:
+        current_stage = "finished"
     emit_progress()
 
-    return {
+    stats: dict[str, float | int | str] = {
         "iterations": iterations,
         "hits": hits,
         "coverage_ratio": cov_map.coverage_ratio(),
@@ -606,3 +805,6 @@ def run(
         "total_docks": total_docks,
         "stopped_reason": stopped_reason,
     }
+    if failure_reason is not None:
+        stats["failure_reason"] = failure_reason
+    return stats

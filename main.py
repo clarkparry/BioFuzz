@@ -54,16 +54,69 @@ def _missing_runtime_dependencies(engine: str | None) -> list[str]:
     return missing
 
 
-def _gpu_enabled(engine: str | None) -> bool:
-    resolved = docking_runner._resolve_binary(engine)
-    if resolved is None:
+def _binary_name(binary: str | None) -> str:
+    if binary is None:
+        return "unknown"
+    return Path(binary).name or binary
+
+
+def _is_gnina_binary(binary: str | None) -> bool:
+    if binary is None:
         return False
-    if "gnina" not in Path(resolved).name.lower():
+    return "gnina" in Path(binary).name.lower()
+
+
+def _gpu_enabled_for_binary(binary: str | None) -> bool:
+    if not _is_gnina_binary(binary):
         return False
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cuda_visible is not None and cuda_visible.strip().lower() in {"", "-1", "none"}:
         return False
     return Path("/dev/nvidiactl").exists() or Path("/proc/driver/nvidia/version").exists()
+
+
+def _engine_runtime_note(
+    requested_engine: str | None,
+    resolved_binary: str | None,
+    gpu_enabled: bool,
+) -> str | None:
+    requested_label = _binary_name(requested_engine) if requested_engine else None
+    resolved_label = _binary_name(resolved_binary) if resolved_binary else None
+
+    if requested_label and resolved_label and requested_label != resolved_label:
+        if "gnina" in requested_label.lower() and "gnina" not in resolved_label.lower():
+            return f"gnina not installed; using {resolved_label} (CPU-only)."
+        return f"Requested {requested_label}; using {resolved_label}."
+
+    if requested_label and resolved_label is None:
+        if "gnina" in requested_label.lower():
+            return "gnina not installed; no docking binary resolved."
+        return f"Requested {requested_label}; no docking binary resolved."
+
+    if _is_gnina_binary(resolved_binary) and not gpu_enabled:
+        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if cuda_visible is not None and cuda_visible.strip().lower() in {"", "-1", "none"}:
+            return "gnina found, but CUDA_VISIBLE_DEVICES disables GPU; running on CPU."
+        return "gnina found, but GPU is not available; running on CPU."
+
+    return None
+
+
+def _runtime_engine_details(engine: str | None) -> tuple[str, bool, str | None]:
+    resolved_binary = docking_runner._resolve_binary(engine)
+    display_engine = resolved_binary if resolved_binary is not None else (engine or "unknown")
+    gpu_enabled = _gpu_enabled_for_binary(resolved_binary)
+    note = _engine_runtime_note(
+        requested_engine=engine,
+        resolved_binary=resolved_binary,
+        gpu_enabled=gpu_enabled,
+    )
+    return display_engine, gpu_enabled, note
+
+
+def _gpu_enabled(engine: str | None) -> bool:
+    resolved = docking_runner._resolve_binary(engine)
+    return _gpu_enabled_for_binary(resolved)
 
 
 def main() -> int:
@@ -76,6 +129,7 @@ def main() -> int:
     corpus_cfg = global_cfg["corpus"]
     molecule_cfg = global_cfg["molecules"]
     engine_name = args.engine if args.engine is not None else global_cfg["docking"]["engine"]
+    runtime_engine, runtime_gpu_enabled, runtime_engine_note = _runtime_engine_details(engine_name)
     worker_count = args.workers if args.workers is not None else global_cfg["fuzzer"]["workers"]
 
     if _requires_runtime_dependencies(args.max_iterations):
@@ -94,57 +148,78 @@ def main() -> int:
 
     tui = FuzzerTUI(
         target=target_cfg.name,
-        engine=engine_name,
+        engine=runtime_engine,
         workers=worker_count,
-        gpu_enabled=_gpu_enabled(engine_name),
+        gpu_enabled=runtime_gpu_enabled,
     )
+    if runtime_engine_note:
+        tui.notice(runtime_engine_note)
 
+    stats: dict[str, float | int | str] | None = None
+    run_error: Exception | None = None
     try:
-        stats = run(
-            target_config=target_cfg,
-            seed_smiles_path=args.seeds,
-            output_dir=output_dir,
-            max_iterations=args.max_iterations,
-            workers=worker_count,
-            checkpoint_every=(
-                args.checkpoint_every
-                if args.checkpoint_every is not None
-                else global_cfg["fuzzer"]["checkpoint_every"]
-            ),
-            mutations_per_entry=(
-                args.mutations_per_entry
-                if args.mutations_per_entry is not None
-                else global_cfg["molecules"]["mutations_per_entry"]
-            ),
-            molecule_min_mw=molecule_cfg.get("min_mw", 0.0),
-            molecule_max_mw=molecule_cfg.get("max_mw", 550.0),
-            molecule_max_logp=molecule_cfg.get("max_logp", 5.0),
-            molecule_max_hbd=molecule_cfg.get("max_hbd", 5),
-            molecule_max_hba=molecule_cfg.get("max_hba", 10),
-            molecule_max_rot_bonds=molecule_cfg.get("max_rot_bonds", 10),
-            exhaustiveness=global_cfg["docking"]["exhaustiveness_fuzz"],
-            exhaustiveness_confirm=global_cfg["docking"].get("exhaustiveness_confirm", 16),
-            num_modes=global_cfg["docking"]["num_modes"],
-            engine=engine_name,
-            max_corpus_size=corpus_cfg["max_size"],
-            priority_new_bit_weight=corpus_cfg["priority_new_bit_weight"],
-            priority_affinity_weight=corpus_cfg["priority_affinity_weight"],
-            priority_reuse_penalty=corpus_cfg["priority_reuse_penalty"],
-            logger=tui.log if tui.enabled else print,
-            progress_callback=tui.update if tui.enabled else None,
-        )
+        try:
+            stats = run(
+                target_config=target_cfg,
+                seed_smiles_path=args.seeds,
+                output_dir=output_dir,
+                max_iterations=args.max_iterations,
+                workers=worker_count,
+                checkpoint_every=(
+                    args.checkpoint_every
+                    if args.checkpoint_every is not None
+                    else global_cfg["fuzzer"]["checkpoint_every"]
+                ),
+                mutations_per_entry=(
+                    args.mutations_per_entry
+                    if args.mutations_per_entry is not None
+                    else global_cfg["molecules"]["mutations_per_entry"]
+                ),
+                molecule_min_mw=molecule_cfg.get("min_mw", 0.0),
+                molecule_max_mw=molecule_cfg.get("max_mw", 550.0),
+                molecule_max_logp=molecule_cfg.get("max_logp", 5.0),
+                molecule_max_hbd=molecule_cfg.get("max_hbd", 5),
+                molecule_max_hba=molecule_cfg.get("max_hba", 10),
+                molecule_max_rot_bonds=molecule_cfg.get("max_rot_bonds", 10),
+                exhaustiveness=global_cfg["docking"]["exhaustiveness_fuzz"],
+                exhaustiveness_confirm=global_cfg["docking"].get("exhaustiveness_confirm", 16),
+                num_modes=global_cfg["docking"]["num_modes"],
+                engine=engine_name,
+                max_corpus_size=corpus_cfg["max_size"],
+                priority_new_bit_weight=corpus_cfg["priority_new_bit_weight"],
+                priority_affinity_weight=corpus_cfg["priority_affinity_weight"],
+                priority_reuse_penalty=corpus_cfg["priority_reuse_penalty"],
+                logger=tui.log if tui.enabled else print,
+                progress_callback=tui.update if tui.enabled else None,
+            )
+        except Exception as exc:  # noqa: BLE001 - user-facing CLI boundary
+            run_error = exc
     finally:
         tui.close()
 
+    if run_error is not None:
+        print(f"Run failed unexpectedly: {type(run_error).__name__}: {run_error}")
+        return 1
+    if stats is None:
+        print("Run failed: no campaign stats were produced.")
+        return 1
+
     stopped_reason = stats.get("stopped_reason")
     if stopped_reason == "keyboard_interrupt":
-        print("Run interrupted by user; checkpoints saved.")
+        print("Run stopped: user quit fuzzing manually; checkpoints saved.")
+    elif stopped_reason == "failed":
+        failure_reason = stats.get("failure_reason", "unknown error")
+        print(f"Run failed gracefully; checkpoints saved where possible. Reason: {failure_reason}")
     else:
         print("Run complete")
     for key, value in stats.items():
         print(f"  {key}: {value}")
 
-    return 130 if stopped_reason == "keyboard_interrupt" else 0
+    if stopped_reason == "keyboard_interrupt":
+        return 130
+    if stopped_reason == "failed":
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

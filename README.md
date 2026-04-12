@@ -32,6 +32,7 @@ The validated local verification path in this workspace is:
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python .agent/tools/install_vina.py
+# Optional (GPU path): .venv/bin/python .agent/tools/install_gnina.py --variant cuda12.8
 .venv/bin/python -m pytest tests -q
 .venv/bin/python .agent/tools/runtime_audit.py
 .venv/bin/python main.py --target egfr_kinase --engine vina --max-iterations 1 --mutations-per-entry 1 --workers 1

@@ -33,6 +33,37 @@ def _target_config(receptor: Path) -> TargetConfig:
     )
 
 
+def _make_successful_dock(
+    output_dir: Path,
+    *,
+    affinity: float = -8.0,
+    x: float = 0.0,
+    y: float = 0.0,
+    z: float = 0.0,
+):
+    calls = {"count": 0}
+
+    def fake_dock(*args, **kwargs) -> DockingResult:
+        calls["count"] += 1
+        pose_path = output_dir / f"pose_{calls['count']}.pdbqt"
+        pose_path.parent.mkdir(parents=True, exist_ok=True)
+        pose_path.write_text(
+            "MODEL 1\n"
+            "ATOM      1  C1  LIG A   1   "
+            f"{x:8.3f}{y:8.3f}{z:8.3f}  0.00  0.00  0.000 C\n"
+            "ENDMDL\n",
+            encoding="utf-8",
+        )
+        return DockingResult(
+            success=True,
+            log_text=f"   1       {affinity:.1f}      0.000      0.000\n",
+            pose_path=str(pose_path),
+            error=None,
+        )
+
+    return fake_dock
+
+
 def test_run_resumes_from_existing_checkpoints_without_reloading_seeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -69,28 +100,144 @@ def test_run_resumes_from_existing_checkpoints_without_reloading_seeds(
     assert stats["coverage_ratio"] == pytest.approx(0.5)
 
 
-def test_run_loads_seeds_when_checkpoint_missing(tmp_path: Path) -> None:
+def test_run_loads_seeds_when_checkpoint_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     receptor = tmp_path / "protein.pdbqt"
     receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
 
     seeds = tmp_path / "seeds.smi"
     seeds.write_text("CCO zinc_1\n", encoding="utf-8")
+    output_dir = tmp_path / "run"
+
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(
+        fuzzer_module,
+        "dock",
+        _make_successful_dock(output_dir),
+    )
 
     stats = run(
         target_config=_target_config(receptor),
         seed_smiles_path=seeds,
-        output_dir=tmp_path / "run",
+        output_dir=output_dir,
         max_iterations=0,
         workers=1,
     )
 
     assert stats["iterations"] == 0
     assert stats["corpus_size"] == 1
-    assert _corpus_checkpoint(tmp_path / "run").exists()
-    assert (tmp_path / "run" / "corpus.json").exists()
+    assert stats["total_docks"] == 1
+    assert _corpus_checkpoint(output_dir).exists()
+    assert (output_dir / "corpus.json").exists()
 
 
-def test_run_skips_mismatched_coverage_checkpoint(tmp_path: Path) -> None:
+def test_run_only_keeps_interesting_seed_inputs_in_initial_corpus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(
+        fuzzer_module,
+        "load_smiles",
+        lambda _path: [("CCO", "seed_interesting"), ("CCN", "seed_boring")],
+    )
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    dock_plan = [
+        {"affinity": -8.0, "x": 0.0},
+        {"affinity": -7.0, "x": 10.0},
+    ]
+
+    def fake_dock(*args, **kwargs) -> DockingResult:
+        call = dock_plan.pop(0)
+        idx = 2 - len(dock_plan)
+        pose_path = output_dir / f"seed_pose_{idx}.pdbqt"
+        pose_path.write_text(
+            "MODEL 1\n"
+            "ATOM      1  C1  LIG A   1   "
+            f"{call['x']:8.3f}{0.0:8.3f}{0.0:8.3f}  0.00  0.00  0.000 C\n"
+            "ENDMDL\n",
+            encoding="utf-8",
+        )
+        return DockingResult(
+            success=True,
+            log_text=f"   1       {call['affinity']:.1f}      0.000      0.000\n",
+            pose_path=str(pose_path),
+            error=None,
+        )
+
+    monkeypatch.setattr(fuzzer_module, "dock", fake_dock)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=1,
+    )
+
+    corpus = Corpus()
+    corpus.load(_corpus_checkpoint(output_dir))
+
+    assert stats["total_docks"] == 2
+    assert stats["corpus_size"] == 1
+    assert corpus.size() == 1
+    assert corpus.pop().source_id == "seed_interesting"
+
+
+def test_run_handles_keyboard_interrupt_during_seed_docking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(
+        fuzzer_module,
+        "load_smiles",
+        lambda _path: [("CCO", "seed_1"), ("CCN", "seed_2")],
+    )
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    dock_calls: list[str] = []
+
+    def interrupting_dock(*args, **kwargs) -> DockingResult:
+        dock_calls.append("called")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fuzzer_module, "dock", interrupting_dock)
+    messages: list[str] = []
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=1,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert stats["total_docks"] == 0
+    assert len(dock_calls) == 1
+    assert (output_dir / "coverage.json").exists()
+    assert _corpus_checkpoint(output_dir).exists()
+    assert any("manual quit requested" in message for message in messages)
+
+
+def test_run_skips_mismatched_coverage_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     output_dir = tmp_path / "run"
     output_dir.mkdir()
 
@@ -101,6 +248,12 @@ def test_run_skips_mismatched_coverage_checkpoint(tmp_path: Path) -> None:
     seeds = tmp_path / "seeds.smi"
     seeds.write_text("CCO zinc_1\n", encoding="utf-8")
     messages: list[str] = []
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(
+        fuzzer_module,
+        "dock",
+        _make_successful_dock(output_dir, affinity=-7.0, x=10.0, y=0.0, z=0.0),
+    )
 
     stats = run(
         target_config=_target_config(receptor),
@@ -112,6 +265,7 @@ def test_run_skips_mismatched_coverage_checkpoint(tmp_path: Path) -> None:
     )
 
     assert stats["coverage_ratio"] == 0.0
+    assert stats["corpus_size"] == 0
     assert any("skipping coverage checkpoint" in message.lower() for message in messages)
 
 
@@ -235,7 +389,7 @@ def test_run_cleans_unprocessed_pose_files_when_max_iterations_hit(
     )
 
     assert stats["iterations"] == 1
-    assert len(pose_paths) == 3
+    assert len(pose_paths) == 4
     assert all(not path.exists() for path in pose_paths)
 
 
@@ -291,7 +445,7 @@ def test_run_confirms_hits_before_saving_findings(
     findings_dirs = list((output_dir / "findings").iterdir())
 
     assert stats["hits"] == 1
-    assert docking_calls == [4, 16]
+    assert docking_calls == [4, 4, 16]
     assert len(findings_dirs) == 1
     assert (findings_dirs[0] / "pose.pdbqt").exists()
 
@@ -370,7 +524,8 @@ def test_run_counts_selectivity_docks_in_total_docks(
 
     def fake_dock(*args, **kwargs) -> DockingResult:
         target = args[1]
-        dock_calls.append(getattr(target, "name", "direct"))
+        target_name = getattr(target, "name", "direct")
+        dock_calls.append(target_name)
         pose_path = output_dir / f"pose_{len(dock_calls)}.pdbqt"
         pose_path.write_text(
             "MODEL 1\n"
@@ -378,7 +533,7 @@ def test_run_counts_selectivity_docks_in_total_docks(
             "ENDMDL\n",
             encoding="utf-8",
         )
-        affinity = -10.0 if len(dock_calls) == 1 else -3.0
+        affinity = -10.0 if target_name == "mini" else -3.0
         return DockingResult(
             success=True,
             log_text=f"   1       {affinity:.1f}      0.000      0.000\n",
@@ -409,4 +564,325 @@ def test_run_counts_selectivity_docks_in_total_docks(
     )
 
     assert stats["iterations"] == 1
-    assert stats["total_docks"] == 2
+    assert stats["total_docks"] == 3
+
+
+def test_run_terminates_worker_pool_and_saves_checkpoints_on_manual_quit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.closed = False
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, _jobs):
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            self.closed = True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=2,
+        mutations_per_entry=1,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert fake_pool.terminated is True
+    assert fake_pool.joined is True
+    assert fake_pool.closed is False
+    assert (output_dir / "coverage.json").exists()
+    assert _corpus_checkpoint(output_dir).exists()
+
+
+def test_run_reports_failed_reason_and_persists_checkpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(
+        fuzzer_module,
+        "mutate",
+        lambda _smiles, n=20, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+    messages: list[str] = []
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=1,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "failed"
+    assert stats["failure_reason"] == "RuntimeError: boom"
+    assert any("[FAIL] campaign failed" in message for message in messages)
+    assert (output_dir / "coverage.json").exists()
+    assert _corpus_checkpoint(output_dir).exists()
+
+
+def test_run_handles_keyboard_interrupt_while_waiting_for_pool_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+
+    class FakeIterator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def next(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise fuzzer_module.PoolTimeoutError()
+            raise KeyboardInterrupt
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.closed = False
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, _jobs):
+            return FakeIterator()
+
+        def close(self) -> None:
+            self.closed = True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=2,
+        mutations_per_entry=1,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert fake_pool.terminated is True
+    assert fake_pool.joined is True
+
+
+def test_run_keeps_manual_abort_reason_when_pool_shutdown_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+
+    class FakePool:
+        def imap_unordered(self, _fn, _jobs):
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            return
+
+        def terminate(self) -> None:
+            raise BrokenPipeError("simulated pipe break during terminate")
+
+        def join(self) -> None:
+            raise BrokenPipeError("simulated pipe break during join")
+
+    messages: list[str] = []
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: FakePool())
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=2,
+        mutations_per_entry=1,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert "failure_reason" not in stats
+    assert any("worker pool shutdown step failed" in message for message in messages)
+    assert any("worker pool join failed" in message for message in messages)
+
+
+def test_run_treats_pool_broken_pipe_during_result_collection_as_manual_abort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+
+    class FakeIterator:
+        def next(self, timeout=None):
+            raise BrokenPipeError("simulated broken pipe while receiving worker result")
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, _jobs):
+            return FakeIterator()
+
+        def close(self) -> None:
+            return
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    messages: list[str] = []
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=2,
+        mutations_per_entry=1,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert fake_pool.terminated is True
+    assert fake_pool.joined is True
+    assert any("pool result channel closed during docking collection" in message for message in messages)
+
+
+def test_run_preserves_manual_abort_when_final_checkpoint_save_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+    monkeypatch.setattr(
+        fuzzer_module,
+        "_save_corpus_checkpoints",
+        lambda _corpus, _paths: (_ for _ in ()).throw(BrokenPipeError("save broke")),
+    )
+
+    class FakePool:
+        def imap_unordered(self, _fn, _jobs):
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            return
+
+        def terminate(self) -> None:
+            return
+
+        def join(self) -> None:
+            return
+
+    messages: list[str] = []
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: FakePool())
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=2,
+        mutations_per_entry=1,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert "failure_reason" not in stats
+    assert any("failed to save final checkpoints after manual abort" in message for message in messages)

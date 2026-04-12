@@ -22,7 +22,9 @@ def test_tui_renders_requested_metrics() -> None:
         enabled=True,
     )
 
-    tui.log("[HIT] test event")
+    tui.log("[CHKPT] iterations=100")
+    tui.notice("gnina not installed; using vina (CPU-only).")
+    tui.log("[HIT] CCN | affinity=-10.20 | confirmed_exhaustiveness=16")
     tui.update(
         RuntimeStatus(
             stage="dock",
@@ -46,11 +48,20 @@ def test_tui_renders_requested_metrics() -> None:
 
     rendered = stream.getvalue()
 
-    assert "BioFuzz AFL-style TUI" in rendered
-    assert "gpu=disabled" in rendered
-    assert "total_docks=128" in rendered
-    assert "docks/sec=6.40" in rendered
-    assert "corpus=2048" in rendered
-    assert "finds=3" in rendered
-    assert "mutation_type=add_substituent" in rendered
-    assert "[HIT] test event" in rendered
+    assert "BioFuzz :: egfr" in rendered
+    assert "Process Info" in rendered
+    assert "Overall Results" in rendered
+    assert "Progress" in rendered
+    assert "Findings In Depth" in rendered
+    assert "State" in rendered
+    assert "Run Log" in rendered
+    assert "Docks/sec" in rendered
+    assert "Corpus Size" in rendered
+    assert "Mutation Type" in rendered
+    assert "CCN" in rendered
+    assert "-10.20" in rendered
+    assert "[INFO] gnina not installed; using vina (CPU-only)." in rendered
+    assert "[CHKPT]" not in rendered
+    assert "Recent events" not in rendered
+    assert "\x1b[?1049h" in rendered
+    assert "\x1b[?1049l" in rendered

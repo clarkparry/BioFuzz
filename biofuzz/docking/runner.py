@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -174,6 +175,10 @@ def dock(
     log_text = (proc.stdout or "")
     if proc.stderr:
         log_text = f"{log_text}\n{proc.stderr}" if log_text else proc.stderr
+
+    if proc.returncode in {-signal.SIGINT, 128 + signal.SIGINT}:
+        pose_path.unlink(missing_ok=True)
+        raise KeyboardInterrupt
 
     success = proc.returncode == 0 and pose_path.exists() and pose_path.stat().st_size > 0
     if not success:
