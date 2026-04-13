@@ -15,6 +15,7 @@ class CorpusEntry:
     times_mutated: int = 0
     best_affinity: float | None = None
     new_bits: int = 0
+    novelty_score: int | None = None
     finds: int = 0
 
 
@@ -70,6 +71,12 @@ class Corpus:
             times_mutated=max(existing.times_mutated, new_entry.times_mutated),
             best_affinity=affinity,
             new_bits=max(existing.new_bits, new_entry.new_bits),
+            novelty_score=max(
+                existing.novelty_score if existing.novelty_score is not None else -1,
+                new_entry.novelty_score if new_entry.novelty_score is not None else -1,
+            )
+            if existing.novelty_score is not None or new_entry.novelty_score is not None
+            else None,
             finds=max(existing.finds, new_entry.finds),
         )
 

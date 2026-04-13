@@ -1,0 +1,31 @@
+Task: Reduce unnecessary TUI runtime overhead while preserving one-second timer updates.
+
+Challenges:
+- The TUI already had a refresh throttle, but all normal update/log/notice paths bypassed it with forced redraws.
+- Timer fields still needed to advance during long blocking dock calls, including single-worker runs where the fuzzer cannot emit progress callbacks while waiting.
+- Parallel runs already had a fuzzer-side heartbeat during pool waits, so fixing redraw frequency without considering heartbeat duplication would leave redundant work in place.
+
+Approach:
+- Keep the TUI heartbeat thread as the single source of one-second timer advancement for interactive runs.
+- Change normal `FuzzerTUI.update()`, `notice()`, and run-log refreshes to use non-forced renders so `refresh_seconds` actually coalesces bursts of progress events.
+- Add a `progress_heartbeat_seconds` parameter to `biofuzz/core/fuzzer.py::run()` so the CLI can disable the fuzzer-side polling heartbeat when a live TUI is active, avoiding duplicate timer-driven updates.
+- Preserve existing fuzzer heartbeat behavior by default for non-TUI progress consumers and regression tests.
+
+Completed Approach:
+- Updated `biofuzz/core/tui.py` so normal update/log/notice paths call `render()` instead of `render(force=True)`; the dedicated TUI heartbeat still uses forced redraws once per heartbeat interval.
+- Updated `biofuzz/core/fuzzer.py` so the pool-wait heartbeat interval is configurable and can be disabled cleanly with `progress_heartbeat_seconds=0.0`.
+- Updated `main.py` so TTY/TUI runs disable the fuzzer-side heartbeat and rely on the TUI heartbeat for one-second timer updates.
+- Added regression coverage for:
+  - TUI redraw coalescing within the refresh window,
+  - disabling fuzzer-side heartbeats while pool results are pending,
+  - CLI wiring that disables the fuzzer heartbeat when the TUI is enabled,
+  - existing timer-heartbeat behavior in the TUI.
+
+Outcome:
+- Rapid bursts of progress callbacks now collapse behind the configured TUI refresh interval instead of repainting the full screen for each internal state change.
+- Interactive runs keep one-second timer updates through the TUI heartbeat without also paying for the fuzzer-side polling heartbeat.
+- Measurement snapshot after the fix: 500 rapid `FuzzerTUI.update()` calls produced 1 repaint before `close()` (2 including the final forced close render), versus a repaint on every call previously.
+
+Validation:
+- `./.venv/bin/python -m pytest -q tests/test_tui.py tests/test_fuzzer.py tests/test_main.py` -> `52 passed`
+- `./.venv/bin/python -m pytest -q` -> `114 passed`

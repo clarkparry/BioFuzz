@@ -9,12 +9,12 @@ import sys
 import threading
 import time
 import traceback
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from biofuzz.core.corpus import Corpus, CorpusEntry
 from biofuzz.core.coverage import CoverageMap
 from biofuzz.core.tui import RuntimeStatus
-from biofuzz.docking.config import TargetConfig
+from biofuzz.docking.config import TargetConfig, normalize_coverage_config
 from biofuzz.docking.parser import parse_log, parse_pose
 from biofuzz.docking.runner import DockingResult, dock
 from biofuzz.molecules import mutator as mutator_module
@@ -68,12 +68,20 @@ def compute_priority_weighted(
     priority_new_bit_weight: float = 10.0,
     priority_affinity_weight: float = 1.0,
     priority_reuse_penalty: float = 0.1,
+    novelty_score: int | None = None,
 ) -> float:
+    coverage_signal = novelty_score if novelty_score is not None else new_bits
     return (
-        (new_bits * priority_new_bit_weight)
+        (coverage_signal * priority_new_bit_weight)
         + (max(0.0, -affinity - 5.0) * priority_affinity_weight)
         - (times_mutated * priority_reuse_penalty)
     )
+
+
+def coverage_signal_for_entry(entry: CorpusEntry) -> int:
+    if entry.novelty_score is not None:
+        return entry.novelty_score
+    return entry.new_bits
 
 
 def score_corpus_entry(
@@ -93,6 +101,7 @@ def score_corpus_entry(
             priority_new_bit_weight=priority_new_bit_weight,
             priority_affinity_weight=priority_affinity_weight,
             priority_reuse_penalty=priority_reuse_penalty,
+            novelty_score=coverage_signal_for_entry(entry),
         )
         + find_bonus,
     )
@@ -101,10 +110,11 @@ def score_corpus_entry(
 def compute_power_score(entry: CorpusEntry) -> float:
     affinity = entry.best_affinity if entry.best_affinity is not None else -5.0
     affinity_bonus = max(0.0, -affinity - 5.0)
+    coverage_signal = coverage_signal_for_entry(entry)
     return max(
         1.0,
         1.0
-        + (entry.new_bits * 2.0)
+        + (coverage_signal * 2.0)
         + affinity_bonus
         + (entry.finds * 6.0)
         - (entry.times_mutated * 0.2),
@@ -325,11 +335,15 @@ def run(
     priority_new_bit_weight: float = 10.0,
     priority_affinity_weight: float = 1.0,
     priority_reuse_penalty: float = 0.1,
+    coverage_config: Mapping[str, Any] | None = None,
     logger: Callable[[str], None] | None = None,
     progress_callback: Callable[[RuntimeStatus], None] | None = None,
+    progress_heartbeat_seconds: float = PROGRESS_HEARTBEAT_SECONDS,
 ) -> dict[str, float | int | str]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    resolved_coverage_config = normalize_coverage_config(coverage_config)
+    progress_heartbeat_seconds = max(0.0, progress_heartbeat_seconds)
 
     def log(message: str) -> None:
         if logger:
@@ -406,7 +420,11 @@ def run(
                 completed_dock_staleness_seconds=completed_dock_staleness_seconds,
                 corpus_size=corpus.size(),
                 finds=hits,
-                coverage_ratio=cov_map.coverage_ratio(),
+                coverage_bitmap_occupancy=cov_map.bitmap_occupancy(),
+                coverage_epoch=cov_map.epoch,
+                novelty_strong_count=cov_map.strong_novelty_count,
+                novelty_weak_count=cov_map.weak_novelty_count,
+                novelty_none_count=cov_map.none_novelty_count,
                 best_affinity=best_affinity,
                 checkpoints=checkpoint_count,
                 elapsed_seconds=elapsed,
@@ -417,7 +435,9 @@ def run(
     def emit_progress_heartbeat(force_stage: str | None = None) -> None:
         if progress_callback is None:
             return
-        if elapsed_seconds() - last_progress_emit_elapsed_seconds < PROGRESS_HEARTBEAT_SECONDS:
+        if progress_heartbeat_seconds <= 0.0:
+            return
+        if elapsed_seconds() - last_progress_emit_elapsed_seconds < progress_heartbeat_seconds:
             return
         emit_progress(force_stage)
 
@@ -539,7 +559,16 @@ def run(
             raise KeyboardInterrupt from exc
 
     corpus = Corpus(max_size=max_corpus_size)
-    cov_map = CoverageMap(target_config.pocket.residue_ids)
+    cov_map = CoverageMap(
+        target_config.pocket.residue_ids,
+        enabled=bool(resolved_coverage_config["enabled"]),
+        mode=str(resolved_coverage_config["mode"]),
+        map_size_bytes=int(resolved_coverage_config["map_size_kib"]) * 1024,
+        occupancy_rotate_threshold=float(
+            resolved_coverage_config["occupancy_rotate_threshold"]
+        ),
+        novelty_weights=resolved_coverage_config["novelty_weights"],
+    )
     findings = FindingsStore(output / "findings")
     cache = PDBQTCache(output / "cache")
     coverage_checkpoint = output / "coverage.json"
@@ -690,7 +719,7 @@ def run(
                         protein_residues,
                         target_config.pocket,
                     )
-                    new_bits = cov_map.update(fingerprint)
+                    observation = cov_map.observe(fingerprint)
                     affinity = modes[0].affinity
 
                     verdict = evaluate_and_process_hit(
@@ -712,11 +741,12 @@ def run(
                             affinity,
                             smiles,
                             source_id,
-                            len(new_bits),
+                            0,
+                            observation.novelty_score,
                             1 if verdict.is_hit else 0,
                         )
                     )
-                    if not new_bits and not verdict.is_hit:
+                    if observation.novelty_score == 0 and not verdict.is_hit:
                         seed_non_interesting += 1
                         return
 
@@ -725,7 +755,7 @@ def run(
                         source_id=source_id,
                         priority=0.1,
                         best_affinity=affinity,
-                        new_bits=len(new_bits),
+                        novelty_score=observation.novelty_score,
                         finds=1 if verdict.is_hit else 0,
                     )
                     seed_entry.priority = score_corpus_entry(
@@ -867,7 +897,14 @@ def run(
             ):
                 top_k = min(SEED_FALLBACK_TOP_K, len(seed_successful_candidates))
                 fallback_seen: set[str] = set()
-                for affinity, smiles, source_id, new_bits_count, finds_count in sorted(
+                for (
+                    affinity,
+                    smiles,
+                    source_id,
+                    new_bits_count,
+                    novelty_score,
+                    finds_count,
+                ) in sorted(
                     seed_successful_candidates,
                     key=lambda item: item[0],
                 )[:top_k]:
@@ -879,7 +916,7 @@ def run(
                         source_id=source_id,
                         priority=0.1,
                         best_affinity=affinity,
-                        new_bits=new_bits_count,
+                        novelty_score=novelty_score,
                         finds=finds_count,
                     )
                     fallback_entry.priority = score_corpus_entry(
@@ -1098,7 +1135,7 @@ def run(
                         protein_residues,
                         target_config.pocket,
                     )
-                    new_bits = cov_map.update(fingerprint)
+                    observation = cov_map.observe(fingerprint)
                     affinity = modes[0].affinity
 
                     verdict = evaluate_and_process_hit(
@@ -1115,7 +1152,7 @@ def run(
                         source_id=f"mutant_of:{entry.source_id}",
                         priority=0.1,
                         best_affinity=affinity,
-                        new_bits=len(new_bits),
+                        novelty_score=observation.novelty_score,
                         finds=1 if verdict.is_hit else 0,
                     )
                     child_entry.priority = score_corpus_entry(
@@ -1146,8 +1183,18 @@ def run(
 
             if checkpoint_every > 0 and iterations % checkpoint_every == 0:
                 log(
-                    "[CHKPT] iterations={} coverage={:.3f} corpus={} hits={}"
-                    .format(iterations, cov_map.coverage_ratio(), corpus.size(), hits)
+                    "[CHKPT] iterations={} occupancy={:.3f} epoch={} corpus={} "
+                    "hits={} novelty_strong={} novelty_weak={} novelty_none={}"
+                    .format(
+                        iterations,
+                        cov_map.bitmap_occupancy(),
+                        cov_map.epoch,
+                        corpus.size(),
+                        hits,
+                        cov_map.strong_novelty_count,
+                        cov_map.weak_novelty_count,
+                        cov_map.none_novelty_count,
+                    )
                 )
             current_stage = "idle"
             emit_progress()
@@ -1235,7 +1282,6 @@ def run(
     stats: dict[str, float | int | str] = {
         "iterations": iterations,
         "hits": hits,
-        "coverage_ratio": cov_map.coverage_ratio(),
         "corpus_size": corpus.size(),
         "best_affinity": best_affinity if best_affinity is not None else 0.0,
         # Kept for CLI/backward compatibility; mirrors attempted dock calls.
@@ -1244,6 +1290,7 @@ def run(
         "completed_docks": completed_docks,
         "stopped_reason": stopped_reason,
     }
+    stats.update(cov_map.stats())
     if failure_reason is not None:
         stats["failure_reason"] = failure_reason
     return stats

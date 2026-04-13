@@ -131,3 +131,23 @@
   - `runtime_issues_for_binary(path)` detects startup/runtime issues (including missing shared libraries).
 - Updated CLI preflight to fail early with actionable dependency details when runtime libs are missing (for example, `gnina runtime (missing shared libraries: libcudnn.so.9)`).
 - This dependency check is now portable across users/machines and does not rely on host-specific wrappers.
+## 2026-04-13 - Hashed fingerprint bitmap coverage rollout
+
+- Implemented the `COVERAGE.md` design as the default coverage mode.
+- BioFuzz now uses hashed fingerprint novelty (`strong=2`, `weak=1`, `none=0` by default) as the runtime coverage signal for seed triage, corpus priority, mutation power scheduling, CLI summaries, and the TUI.
+- The old union residue metric was removed from the live runtime path after verification showed it was no longer used for scheduling. `CorpusEntry.new_bits` remains only as a compatibility fallback when loading older corpus checkpoints.
+- Coverage checkpoints persist the epoch-window bitmap state (`current_map`, `previous_map`, `epoch`, occupancy metadata, stable residue mapping, and novelty counters) while still loading legacy union-only checkpoints for resume compatibility.
+- Added a new `coverage:` config section in `config.yaml` with validated defaults:
+  - `enabled`
+  - `mode`
+  - `map_size_kib`
+  - `occupancy_rotate_threshold`
+  - `novelty_weights`
+- Runtime TUI coverage now shows bitmap occupancy, epoch, and cumulative strong/weak/none novelty counts. These values come directly from `CoverageMap` counters, so the display adds effectively no extra hot-path overhead.
+
+## 2026-04-13 - TUI redraw throttling and heartbeat deduplication
+
+- Kept the TUI's one-second heartbeat as the source of timer updates for interactive runs, including long single-worker dock waits.
+- Changed normal TUI `update()`, `notice()`, and run-log refreshes to honor `refresh_seconds` instead of forcing a full repaint for every progress event.
+- Disabled the fuzzer-side pool-wait heartbeat during TUI-enabled runs so interactive sessions do not pay for two independent timer/redraw loops.
+- Regression coverage now protects redraw coalescing, fuzzer-heartbeat disablement for TUI runs, and continued one-second timer advancement in the TUI.

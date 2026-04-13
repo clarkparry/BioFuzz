@@ -1033,3 +1033,54 @@ Validation performed:
 
 - `./.venv/bin/python -m pytest -q tests/test_fuzzer.py -k "single_chunk_pool_dispatch or falls_back_to_single_worker_when_pool_creation_fails or does_not_block_when_pool_join_hangs_after_manual_abort"` -> `3 passed`
 - `./.venv/bin/python -m pytest -q` -> `98 passed`
+
+## Phase Summary: Hashed Fingerprint Bitmap Coverage
+
+This phase replaced BioFuzz's union-only novelty guidance with the hashed fingerprint bitmap model described in `COVERAGE.md` while deliberately keeping the residue-union coverage ratio intact for human-readable progress reporting. The old implementation could only reward molecules that touched previously unseen residues, so novelty pressure collapsed once the residue union saturated. The new implementation instead turns each fingerprint into a stable per-pocket bitmask, hashes that mask into a fixed-size bitmap, and classifies observations as strong, weak, or non-novel using a current/previous epoch window.
+
+The successful approach was to keep the compatibility surface small while changing the underlying guidance model everywhere it mattered. `biofuzz/core/coverage.py` now owns the hashed bitmap state, deterministic mapping/hash logic, epoch rotation, checkpoint persistence, and a new `CoverageObservation` API. `biofuzz/core/fuzzer.py` was then updated to consume `novelty_score` during seed triage, corpus scoring, and mutation power scheduling, while still preserving `new_bits` and `coverage_ratio` for reporting and legacy checkpoints. `biofuzz/docking/config.py` and `config.yaml` were extended with validated coverage defaults so map size, rotation threshold, and novelty weights are configurable without widening the target config surface.
+
+The main challenge was preserving resume and reporting behavior during a fairly fundamental internal change. Existing coverage checkpoints only stored union coverage, existing tests assumed `coverage_ratio` remained present, and parts of the startup seed path still gated usefulness on `new_bits` alone. The fix was to support both checkpoint formats, keep union coverage in the model, and add targeted regressions for hashed novelty classification, rotation, config validation, legacy checkpoint loading, and seed-stage interestingness.
+
+Validation performed:
+
+- `./.venv/bin/python -m pytest -q tests/test_coverage.py tests/test_config.py tests/test_corpus.py tests/test_fuzzer.py` -> `56 passed`
+- `./.venv/bin/python -m pytest -q` -> `110 passed`
+
+## Future Work
+
+The next useful extension would be supporting target-specific coverage overrides instead of only global defaults, especially for very small or very large pockets that may want different bitmap sizes or novelty weights. That would improve tuning flexibility per campaign, but the main challenge is defining a clean precedence model between global config, target config, and coverage checkpoint compatibility expectations.
+
+## Phase Summary: Runtime TUI Hashed Coverage And Union Removal
+
+This phase focused on finishing the runtime transition to the hashed fingerprint metric rather than only using it under the hood. The scheduler was already driven by `novelty_score`, but the TUI and some reporting surfaces still emphasized the removed union-style metric, which made the live runtime view lag behind the actual scheduling logic.
+
+The successful approach was to expose only counters that the coverage tracker already maintains, so the TUI becomes more informative without adding meaningful hot-path cost. `biofuzz/core/tui.py` and the `RuntimeStatus` payload now display bitmap occupancy, epoch, and cumulative strong/weak/none novelty counts. At the same time, `biofuzz/core/coverage.py` dropped live union-residue bookkeeping entirely, since it was no longer used for scheduling or runtime reporting. The only remaining trace of the old path is `CorpusEntry.new_bits` as a compatibility fallback for loading older corpus checkpoints.
+
+The main challenge was separating compatibility from active behavior. Some old tests, docs, and fake checkpoints still referenced `coverage_ratio`, union coverage sets, or `new_bits`-derived expectations even though the live system no longer depended on them. The fix was to keep backward-loading behavior where it matters (older checkpoints) while rewriting the runtime payload, docs, and tests around the hashed metric only.
+
+Validation performed:
+
+- `./.venv/bin/python -m pytest -q tests/test_coverage.py tests/test_tui.py tests/test_fuzzer.py tests/test_main.py` -> `56 passed`
+- `./.venv/bin/python -m pytest -q` -> `110 passed`
+
+## Future Work
+
+The next useful improvement would be exposing per-iteration novelty class transitions in the run log or a lightweight histogram, so operators can tell whether a campaign is still finding strong novelty or mostly recycling weak/none buckets. The main challenge is adding that visibility without turning the TUI into a noisy event stream or inflating logging volume during long fuzzing runs.
+
+## Phase Summary: TUI Redraw Throttling And Heartbeat Deduplication
+
+This phase tightened the runtime behavior of the interactive TUI rather than changing what it displays. The earlier AFL-style screen already exposed useful scheduler and docking telemetry, but normal update, notice, and hit-log paths still forced a full-screen repaint for every internal state transition. That meant the intended refresh throttle existed in code but was not actually governing most live redraws.
+
+The successful approach was to keep the solution narrow and preserve the one thing the extra repaints were trying to protect: timer continuity. `biofuzz/core/tui.py` now lets ordinary progress/log/notice updates flow through the existing refresh gate, so redraw bursts are coalesced behind `refresh_seconds`. The one-second TUI heartbeat still forces redraws specifically so runtime, time-since-last-find, and dock-staleness timers continue to advance during long single-worker dock waits. At the same time, `main.py` now disables the fuzzer-side pool-wait heartbeat when the TUI is active, avoiding duplicate timer/redraw loops during interactive runs.
+
+The main challenge was reducing repaint overhead without regressing either timer behavior or non-TUI progress consumers. The fix was to make the fuzzer heartbeat configurable instead of removing it globally, then add regression coverage proving that TUI runs disable the duplicate heartbeat while non-TUI progress callbacks still retain the old behavior by default.
+
+Validation performed:
+
+- `./.venv/bin/python -m pytest -q tests/test_tui.py tests/test_fuzzer.py tests/test_main.py` -> `52 passed`
+- `./.venv/bin/python -m pytest -q` -> `114 passed`
+
+## Future Work
+
+The next useful improvement would be reducing progress-callback churn itself in places where the fuzzer emits many intermediate state transitions that humans do not meaningfully distinguish. The main challenge is preserving the most informative stage transitions for operators and tests while collapsing the low-signal ones enough to keep the live view responsive and simple.

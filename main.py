@@ -5,12 +5,13 @@ from datetime import datetime
 import os
 from pathlib import Path
 
-from biofuzz.core.fuzzer import run
+from biofuzz.core.fuzzer import PROGRESS_HEARTBEAT_SECONDS, run
 from biofuzz.core.tui import FuzzerTUI
 from biofuzz.docking.config import (
     apply_global_defaults_to_target,
     load_global_config,
     load_target_config,
+    resolve_coverage_config,
 )
 from biofuzz.docking import runner as docking_runner
 from biofuzz.molecules import preparation
@@ -144,6 +145,7 @@ def main() -> int:
     engine_name = args.engine if args.engine is not None else global_cfg["docking"]["engine"]
     runtime_engine, runtime_gpu_enabled, runtime_engine_note = _runtime_engine_details(engine_name)
     worker_count = args.workers if args.workers is not None else global_cfg["fuzzer"]["workers"]
+    coverage_cfg = resolve_coverage_config(global_cfg)
 
     if _requires_runtime_dependencies(args.max_iterations):
         missing = _missing_runtime_dependencies(engine_name)
@@ -202,8 +204,10 @@ def main() -> int:
                 priority_new_bit_weight=corpus_cfg["priority_new_bit_weight"],
                 priority_affinity_weight=corpus_cfg["priority_affinity_weight"],
                 priority_reuse_penalty=corpus_cfg["priority_reuse_penalty"],
+                coverage_config=coverage_cfg,
                 logger=tui.log if tui.enabled else print,
                 progress_callback=tui.update if tui.enabled else None,
+                progress_heartbeat_seconds=(0.0 if tui.enabled else PROGRESS_HEARTBEAT_SECONDS),
             )
         except Exception as exc:  # noqa: BLE001 - user-facing CLI boundary
             run_error = exc

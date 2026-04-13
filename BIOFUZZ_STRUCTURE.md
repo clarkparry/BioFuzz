@@ -17,7 +17,7 @@ BioFuzz/
 │   │   ├── __init__.py
 │   │   ├── fuzzer.py           # Main loop orchestrator
 │   │   ├── corpus.py           # Molecule queue / priority management
-│   │   └── coverage.py         # Coverage map (the bitmap equivalent)
+│   │   └── coverage.py         # Hashed fingerprint bitmap + union coverage reporting
 │   │
 │   ├── molecules/              # Everything molecule-side
 │   │   ├── __init__.py
@@ -61,7 +61,7 @@ BioFuzz/
 │   └── 2025-01-01_hiv/
 │       ├── findings/           # Confirmed hit PDBQT + metadata
 │       ├── corpus/             # Evolved molecule queue state
-│       └── coverage.json       # Coverage map snapshot
+│       └── coverage.json       # Versioned hashed coverage checkpoint snapshot
 │
 ├── scripts/                    # Standalone utilities
 │   ├── prep_protein.sh         # Wrap ADFRsuite prepare_receptor
@@ -93,11 +93,11 @@ Phase 2: Docking Runner             PDBQT → affinity score + pose
     │
 Phase 3: Output Parser              pose file → structured data in Python
     │
-Phase 4: Coverage Map               pose data → residue contact fingerprint
+Phase 4: Coverage Map               pose data → hashed novelty + union coverage
     │
 Phase 5: Oracle                     score + fingerprint → hit/no-hit decision
     │
-Phase 6: Corpus Manager             prioritized queue + new-coverage tracking
+Phase 6: Corpus Manager             prioritized queue + novelty-weighted scheduling
     │
 Phase 7: Mutation Engine            molecule → chemically valid mutants
     │
@@ -242,7 +242,7 @@ print("Phase 3 OK")
 ## Phase 4 — Coverage Map
 **Files:** `biofuzz/protein/residues.py`, `biofuzz/protein/pocket.py`, `biofuzz/core/coverage.py`
 
-The coverage subsystem. Analogous to AFL's `__afl_area_ptr` bitmap.
+The coverage subsystem. Analogous to AFL's `__afl_area_ptr` bitmap, but specialized for residue-contact fingerprints.
 
 ```
 protein/residues.py     Parse protein PDBQT → {res_id: [(x,y,z), ...]}
@@ -254,8 +254,8 @@ protein/pocket.py       For a given pose, compute which pocket residues
          │
          ▼
 core/coverage.py        CoverageMap class:
-                          - global_coverage: set  (union of all fingerprints seen)
-                          - update(fingerprint) → new_bits (empty = no new coverage)
+                          - observe(fingerprint) → CoverageObservation
+                          - hashed novelty bitmap with current/previous epochs
                           - save/load to JSON    (resume across runs)
 ```
 
@@ -263,11 +263,14 @@ core/coverage.py        CoverageMap class:
 # core/coverage.py (interface)
 
 class CoverageMap:
-    def update(self, fingerprint: frozenset) -> frozenset:
-        """Returns newly covered residues. Empty = no new coverage."""
+    def observe(self, fingerprint: frozenset) -> CoverageObservation:
+        """Returns hashed novelty classification/score for a fingerprint."""
 
-    def coverage_ratio(self) -> float:
-        """Fraction of pocket residues ever contacted. 1.0 = full coverage."""
+    def update(self, fingerprint: frozenset) -> frozenset:
+        """Legacy compatibility API. Triggers observation and returns an empty set."""
+
+    def bitmap_occupancy(self) -> float:
+        """Current hashed bitmap occupancy ratio for epoch rotation."""
 
     def save(self, path: str) -> None: ...
     def load(self, path: str) -> None: ...
@@ -282,11 +285,11 @@ fp1  = compute_fingerprint(atoms_indinavir, protein_residues, pocket_def)
 fp2  = compute_fingerprint(atoms_aspirin,   protein_residues, pocket_def)
 
 cov  = CoverageMap(pocket_def.residue_ids)
-new1 = cov.update(fp1)   # all of fp1 is new
-new2 = cov.update(fp2)   # only residues in fp2 NOT in fp1 are new
+obs1 = cov.observe(fp1)  # strong novelty on first sighting
+obs2 = cov.observe(fp2)  # may produce strong, weak, or repeated novelty
 new3 = cov.update(fp1)   # empty -- fp1 was already seen
 
-assert len(new1) > 0
+assert obs1.novelty_score == 2
 assert new3 == frozenset()
 print("Phase 4 OK")
 ```
@@ -337,7 +340,7 @@ print("Phase 5 OK")
 **Files:** `biofuzz/core/corpus.py`
 
 The molecule queue. Analogous to AFL's `queue/` directory + prioritization logic.
-Molecules with new coverage get higher priority. Molecules that produced no new coverage get lower priority but aren't discarded (they're still useful for splicing).
+Molecules with stronger hashed novelty get higher priority. Molecules that produced no current novelty get lower priority but aren't discarded (they're still useful for splicing and later mutation stages).
 
 ```python
 # biofuzz/core/corpus.py (interface)
@@ -350,6 +353,7 @@ class CorpusEntry:
     times_mutated: int
     best_affinity: float | None
     new_bits:      int          # how many new coverage bits this produced
+    novelty_score: int | None   # hashed novelty score (strong/weak/none)
 
 class Corpus:
     def add(self, entry: CorpusEntry) -> None: ...
@@ -361,8 +365,9 @@ class Corpus:
 
 **Priority formula** (tune this):
 ```python
-priority = (new_bits * 10.0) + max(0, -affinity - 5.0) - (times_mutated * 0.1)
-# New coverage dominates. Affinity bonus. Slight penalty for overused entries.
+coverage_signal = novelty_score if novelty_score is not None else new_bits
+priority = (coverage_signal * 10.0) + max(0, -affinity - 5.0) - (times_mutated * 0.1)
+# Hashed novelty dominates. Affinity bonus. Slight penalty for overused entries.
 ```
 
 **Completion criterion:**
@@ -436,13 +441,13 @@ def run(target_config, seed_smiles_path, output_dir, max_iterations=None):
 
     # --- Init ---
     corpus   = Corpus()
-    cov_map  = CoverageMap(target_config.pocket_residues)
+    cov_map  = CoverageMap(target_config.pocket_residues, **coverage_config)
     findings = FindingsStore(output_dir / "findings")
     cache    = PDBQTCache(output_dir / "cache")
 
-    # Load seeds into corpus at baseline priority
+    # Seed triage: dock each seed once and only retain interesting entries
     for smiles, zinc_id in load_smiles(seed_smiles_path):
-        corpus.add(CorpusEntry(smiles, zinc_id, priority=1.0, ...))
+        ...
 
     # --- Main loop ---
     iteration = 0
@@ -479,7 +484,7 @@ def run(target_config, seed_smiles_path, output_dir, max_iterations=None):
             # 6. Coverage
             fingerprint  = compute_fingerprint(atoms, protein_residues,
                                                target_config.pocket)
-            new_bits     = cov_map.update(fingerprint)
+            observation  = cov_map.observe(fingerprint)
             affinity     = modes[0].affinity
 
             # 7. Oracle
@@ -489,10 +494,10 @@ def run(target_config, seed_smiles_path, output_dir, max_iterations=None):
                 log(f"[HIT] {smiles} | affinity={affinity:.1f}")
 
             # 8. Corpus update
-            priority = compute_priority(new_bits, affinity, entry.times_mutated)
+            priority = compute_priority(observation.novelty_score, affinity, entry.times_mutated)
             corpus.add(CorpusEntry(smiles, f"mutant_of:{entry.source_id}",
                                    priority=priority, best_affinity=affinity,
-                                   new_bits=len(new_bits)))
+                                   novelty_score=observation.novelty_score))
 
             # 9. Log progress
             log_progress(iteration, cov_map, corpus, findings)
@@ -594,9 +599,9 @@ zinc_seeds.smi
       │    compute_fingerprint()                  │
       │          │                                │
       │          ▼                                │
-      │    coverage_map.update()                  │
+      │    coverage_map.observe()                 │
       │          │                                │
-      │          └──── new_bits                   │
+      │          └──── novelty_score             │
       │                    │                      │
       └────────────────────┴──► compute_priority()│
                                         │         │
@@ -632,6 +637,16 @@ corpus:
   priority_new_bit_weight:  10.0
   priority_affinity_weight:  1.0
   priority_reuse_penalty:    0.1
+
+coverage:
+  enabled:                    true
+  mode:                       hashed_fingerprint
+  map_size_kib:               256
+  occupancy_rotate_threshold: 0.55
+  novelty_weights:
+    strong: 2
+    weak:   1
+    none:   0
 
 fuzzer:
   workers:         4             # parallel docking processes
@@ -701,7 +716,7 @@ pytest tests/ --cov=biofuzz --cov-report=term-missing
 | `filters.py` | aspirin passes; known toxic compound fails; edge cases at MW boundary |
 | `preparation.py` | valid SMILES → PDBQT; invalid SMILES → None; embedding failure → None |
 | `parser.py` | parse real Vina log; parse real pose PDBQT; handle empty output |
-| `coverage.py` | update adds bits; re-update same fp → empty new_bits; save/load round-trip |
+| `coverage.py` | deterministic hash index; strong/weak/none novelty classification; rotation; legacy + new checkpoint round-trip |
 | `oracle.py` | strong binder → hit; weak binder → no hit; strain too high → no hit |
 | `corpus.py` | pop returns highest priority; save/load preserves order |
 | `mutator.py` | all outputs parse; no output = input; n=0 → empty list |

@@ -1,6 +1,9 @@
 from pathlib import Path
+import json
 
-from biofuzz.core.coverage import CoverageMap
+import pytest
+
+from biofuzz.core.coverage import CoverageMap, validate_coverage_settings
 from biofuzz.docking.config import PocketConfig
 from biofuzz.docking.parser import PoseAtom
 from biofuzz.protein.pocket import compute_fingerprint
@@ -21,30 +24,110 @@ def test_coverage_update_and_persistence(tmp_path: Path) -> None:
     fp2 = compute_fingerprint(atoms_b, protein_residues, pocket)
 
     cov = CoverageMap(pocket.residue_ids)
-    new1 = cov.update(fp1)
-    new2 = cov.update(fp2)
-    new3 = cov.update(fp1)
+    obs1 = cov.observe(fp1)
+    obs2 = cov.observe(fp2)
+    obs3 = cov.observe(fp1)
 
-    assert len(new1) > 0
-    assert len(new2) > 0
-    assert new3 == frozenset()
+    assert obs1.novelty_class == "strong"
+    assert obs2.novelty_class in {"strong", "weak", "none"}
+    assert obs3.novelty_class == "none"
 
     save_path = tmp_path / "coverage.json"
     cov.save(save_path)
 
     loaded = CoverageMap(set())
     loaded.load(save_path)
-    assert loaded.global_coverage == cov.global_coverage
     assert loaded.pocket_residue_ids == cov.pocket_residue_ids
+    assert loaded.current_map == cov.current_map
+    assert loaded.previous_map == cov.previous_map
+
+
+def test_coverage_mapping_and_hash_are_stable_for_same_pocket() -> None:
+    cov_a = CoverageMap({25, 8, 23}, map_size_bytes=1024)
+    cov_b = CoverageMap({8, 23, 25}, map_size_bytes=1024)
+
+    assert cov_a.residue_to_bit_index == {8: 0, 23: 1, 25: 2}
+    assert cov_a.residue_to_bit_index == cov_b.residue_to_bit_index
+
+    fingerprint = frozenset({8, 25})
+    valid_a, mask_a = cov_a.fingerprint_to_mask(fingerprint)
+    valid_b, mask_b = cov_b.fingerprint_to_mask(fingerprint)
+
+    assert valid_a == fingerprint
+    assert valid_b == fingerprint
+    assert mask_a == mask_b
+    assert cov_a.hash_mask(mask_a) == cov_b.hash_mask(mask_b)
+
+
+def test_coverage_observe_classifies_strong_weak_and_none() -> None:
+    cov = CoverageMap({8, 23, 25}, map_size_bytes=1024)
+
+    strong = cov.observe(frozenset({8, 25}))
+    cov._rotate_epoch()
+    weak = cov.observe(frozenset({8, 25}))
+    none = cov.observe(frozenset({8, 25}))
+
+    assert strong.novelty_class == "strong"
+    assert strong.novelty_score == 2
+    assert weak.novelty_class == "weak"
+    assert weak.novelty_score == 1
+    assert none.novelty_class == "none"
+    assert none.novelty_score == 0
+    assert cov.novelty_counts() == {"strong": 1, "weak": 1, "none": 1}
+
+
+def test_coverage_rotates_epoch_when_occupancy_threshold_is_crossed() -> None:
+    cov = CoverageMap({8}, map_size_bytes=1024, occupancy_rotate_threshold=0.1)
+    valid_fingerprint, mask = cov.fingerprint_to_mask(frozenset({8}))
+    hash_index = cov.hash_mask(mask)
+    threshold_count = int(cov.map_size_bytes * cov.occupancy_rotate_threshold) + 1
+    for offset in range(threshold_count - 1):
+        cov.current_map[(hash_index + offset + 1) % cov.map_size_bytes] = 1
+    cov.current_nonzero_count = threshold_count - 1
+
+    observation = cov.observe(valid_fingerprint)
+
+    assert observation.rotated is True
+    assert observation.epoch == 1
+    assert cov.epoch == 1
+    assert cov.bitmap_occupancy() == 0.0
+    assert cov.previous_map[hash_index] == 1
+
+
+def test_coverage_loads_legacy_union_only_checkpoint(tmp_path: Path) -> None:
+    save_path = tmp_path / "coverage_legacy.json"
+    save_path.write_text(
+        json.dumps(
+            {
+                "pocket_residue_ids": [8, 23, 25],
+                "global_coverage": [8, 25],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cov = CoverageMap(set())
+    cov.load(save_path)
+
+    assert cov.pocket_residue_ids == {8, 23, 25}
+    assert cov.epoch == 0
+    assert cov.novelty_counts() == {"strong": 0, "weak": 0, "none": 0}
+
+
+def test_validate_coverage_settings_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError, match="power of two"):
+        validate_coverage_settings(map_size_bytes=250 * 1024, occupancy_rotate_threshold=0.55)
+
+    with pytest.raises(ValueError, match="between 0.1 and 0.95"):
+        validate_coverage_settings(map_size_bytes=1024, occupancy_rotate_threshold=0.01)
 
 
 def test_coverage_ignores_residues_outside_defined_pocket() -> None:
     cov = CoverageMap({8, 23, 25})
-    new_bits = cov.update(frozenset({8, 99}))
+    observation = cov.observe(frozenset({8, 99}))
 
-    assert new_bits == frozenset({8})
-    assert cov.global_coverage == {8}
-    assert cov.coverage_ratio() == 1.0 / 3.0
+    assert observation.fingerprint == frozenset({8})
+    assert observation.novelty_class == "strong"
 
 
 def test_compute_fingerprint_ignores_hydrogen_only_contacts() -> None:

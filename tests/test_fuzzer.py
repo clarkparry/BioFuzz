@@ -7,7 +7,7 @@ import pytest
 
 import biofuzz.core.fuzzer as fuzzer_module
 from biofuzz.core.corpus import Corpus, CorpusEntry
-from biofuzz.core.coverage import CoverageMap
+from biofuzz.core.coverage import CoverageMap, CoverageObservation
 from biofuzz.core.fuzzer import run
 from biofuzz.docking.config import BoxConfig, OracleConfig, PocketConfig, TargetConfig
 from biofuzz.docking.runner import DockingResult
@@ -98,7 +98,7 @@ def test_run_resumes_from_existing_checkpoints_without_reloading_seeds(
 
     assert stats["iterations"] == 0
     assert stats["corpus_size"] == 1
-    assert stats["coverage_ratio"] == pytest.approx(0.5)
+    assert stats["coverage_bitmap_occupancy"] > 0.0
 
 
 def test_run_loads_seeds_when_checkpoint_missing(
@@ -132,6 +132,119 @@ def test_run_loads_seeds_when_checkpoint_missing(
     assert stats["total_docks"] == 1
     assert _corpus_checkpoint(output_dir).exists()
     assert (output_dir / "corpus.json").exists()
+
+
+def test_run_returns_hashed_coverage_metrics_in_stats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir, x=0.0, y=0.0, z=0.0))
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=1,
+    )
+
+    assert stats["coverage_mode"] == "hashed_fingerprint"
+    assert stats["coverage_bitmap_occupancy"] > 0.0
+    assert stats["coverage_epoch"] == 0
+    assert stats["novelty_strong_count"] == 1
+    assert stats["novelty_weak_count"] == 0
+    assert stats["novelty_none_count"] == 0
+
+
+def test_run_treats_hashed_seed_novelty_as_interesting_even_without_new_union_bits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir, x=10.0, y=0.0, z=0.0))
+
+    class FakeCoverageMap:
+        def __init__(self, pocket_residue_ids, **kwargs) -> None:
+            self.pocket_residue_ids = {int(value) for value in pocket_residue_ids}
+            self.epoch = 0
+            self.strong_novelty_count = 0
+            self.weak_novelty_count = 0
+            self.none_novelty_count = 0
+            self._calls = 0
+
+        def observe(self, fingerprint: frozenset[int]) -> CoverageObservation:
+            self._calls += 1
+            if self._calls == 1:
+                self.strong_novelty_count += 1
+                return CoverageObservation(
+                    fingerprint=fingerprint,
+                    fingerprint_mask=0,
+                    hash_index=0,
+                    novelty_class="strong",
+                    novelty_score=2,
+                    bitmap_occupancy=0.0,
+                    epoch=0,
+                )
+            self.none_novelty_count += 1
+            return CoverageObservation(
+                fingerprint=fingerprint,
+                fingerprint_mask=0,
+                hash_index=0,
+                novelty_class="none",
+                novelty_score=0,
+                bitmap_occupancy=0.0,
+                epoch=0,
+            )
+
+        def update(self, fingerprint: frozenset[int]) -> frozenset[int]:
+            self.observe(fingerprint)
+            return frozenset()
+
+        def bitmap_occupancy(self) -> float:
+            return 0.0
+
+        def stats(self) -> dict[str, float | int | str]:
+            return {
+                "coverage_mode": "hashed_fingerprint",
+                "coverage_bitmap_occupancy": 0.0,
+                "coverage_epoch": 0,
+                "novelty_strong_count": self.strong_novelty_count,
+                "novelty_weak_count": self.weak_novelty_count,
+                "novelty_none_count": self.none_novelty_count,
+            }
+
+        def save(self, path: Path) -> None:
+            path.write_text('{"pocket_residue_ids": [1, 2]}', encoding="utf-8")
+
+        def load(self, path: Path) -> None:
+            return
+
+    monkeypatch.setattr(fuzzer_module, "CoverageMap", FakeCoverageMap)
+    messages: list[str] = []
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=1,
+        logger=messages.append,
+    )
+
+    assert stats["corpus_size"] == 1
+    assert any("interesting=1" in message and "fallback_added=0" in message for message in messages)
 
 
 def test_run_parallelizes_seed_docking_when_workers_gt_one(
@@ -314,6 +427,103 @@ def test_run_emits_progress_heartbeat_while_waiting_for_seed_pool_results(
         if status.stage == "seed_dock" and status.total_docks == 1 and status.completed_docks == 0
     ]
     assert len(seed_wait_updates) >= 2
+    assert stats["completed_docks"] == 1
+    assert fake_pool.closed is True
+    assert fake_pool.terminated is False
+    assert fake_pool.joined is True
+
+
+def test_run_can_disable_progress_heartbeat_while_waiting_for_seed_pool_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    pose_path = output_dir / "seed_pool_pose_0.pdbqt"
+    pose_path.write_text(
+        "MODEL 1\n"
+        "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+        "ENDMDL\n",
+        encoding="utf-8",
+    )
+    result = (
+        0,
+        DockingResult(
+            success=True,
+            log_text="   1       -8.0      0.000      0.000\n",
+            pose_path=str(pose_path),
+            error=None,
+            completed=True,
+        ),
+    )
+
+    class FakeIterator:
+        def __init__(self) -> None:
+            self.timeouts_remaining = 3
+            self.sent = False
+
+        def next(self, timeout=None):  # noqa: ANN001 - multiprocessing iterator compatibility
+            if self.timeouts_remaining > 0:
+                self.timeouts_remaining -= 1
+                raise fuzzer_module.PoolTimeoutError()
+            if self.sent:
+                raise AssertionError("seed iterator consumed too many times")
+            self.sent = True
+            return result
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.closed = False
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, _jobs):
+            return FakeIterator()
+
+        def close(self) -> None:
+            self.closed = True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    now = {"value": 0.0}
+
+    def fake_monotonic() -> float:
+        now["value"] += 0.6
+        return now["value"]
+
+    monkeypatch.setattr(fuzzer_module.time, "monotonic", fake_monotonic)
+
+    statuses = []
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=2,
+        progress_callback=statuses.append,
+        progress_heartbeat_seconds=0.0,
+    )
+
+    seed_wait_updates = [
+        status
+        for status in statuses
+        if status.stage == "seed_dock" and status.total_docks == 1 and status.completed_docks == 0
+    ]
+    assert len(seed_wait_updates) == 0
     assert stats["completed_docks"] == 1
     assert fake_pool.closed is True
     assert fake_pool.terminated is False
@@ -559,7 +769,7 @@ def test_run_skips_mismatched_coverage_checkpoint(
         logger=messages.append,
     )
 
-    assert stats["coverage_ratio"] == 0.0
+    assert stats["coverage_bitmap_occupancy"] > 0.0
     assert stats["corpus_size"] == 1
     assert any("skipping coverage checkpoint" in message.lower() for message in messages)
     assert any(message.startswith("[SEED][FALLBACK]") for message in messages)

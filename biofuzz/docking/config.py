@@ -7,6 +7,14 @@ import copy
 import types
 from typing import Any, Iterable, Mapping
 
+from biofuzz.core.coverage import (
+    DEFAULT_COVERAGE_MAP_SIZE_KIB,
+    DEFAULT_COVERAGE_MODE,
+    DEFAULT_OCCUPANCY_ROTATE_THRESHOLD,
+    normalize_novelty_weights,
+    validate_coverage_settings,
+)
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - optional dependency in runtime environments
@@ -36,6 +44,17 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
         "priority_new_bit_weight": 10.0,
         "priority_affinity_weight": 1.0,
         "priority_reuse_penalty": 0.1,
+    },
+    "coverage": {
+        "enabled": True,
+        "mode": DEFAULT_COVERAGE_MODE,
+        "map_size_kib": DEFAULT_COVERAGE_MAP_SIZE_KIB,
+        "occupancy_rotate_threshold": DEFAULT_OCCUPANCY_ROTATE_THRESHOLD,
+        "novelty_weights": {
+            "strong": 2,
+            "weak": 1,
+            "none": 0,
+        },
     },
     "fuzzer": {
         "workers": 4,
@@ -154,7 +173,49 @@ def load_global_config(path: str | Path = "config.yaml") -> dict[str, Any]:
     if not isinstance(loaded, Mapping):
         raise ValueError(f"Invalid config format in {cfg_path}; expected a YAML mapping")
 
-    return _deep_merge(DEFAULT_GLOBAL_CONFIG, loaded)
+    merged = _deep_merge(DEFAULT_GLOBAL_CONFIG, loaded)
+    merged["coverage"] = normalize_coverage_config(merged.get("coverage"))
+    return merged
+
+
+def normalize_coverage_config(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        raw: Mapping[str, Any] = {}
+    elif not isinstance(value, Mapping):
+        raise ValueError("coverage config must be a mapping")
+    else:
+        raw = value
+
+    mode = str(raw.get("mode", DEFAULT_COVERAGE_MODE))
+    map_size_kib = int(raw.get("map_size_kib", DEFAULT_COVERAGE_MAP_SIZE_KIB))
+    map_size_bytes, occupancy_rotate_threshold = validate_coverage_settings(
+        map_size_bytes=map_size_kib * 1024,
+        occupancy_rotate_threshold=float(
+            raw.get(
+                "occupancy_rotate_threshold",
+                DEFAULT_OCCUPANCY_ROTATE_THRESHOLD,
+            )
+        ),
+        mode=mode,
+    )
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "mode": mode,
+        "map_size_kib": map_size_bytes // 1024,
+        "occupancy_rotate_threshold": occupancy_rotate_threshold,
+        "novelty_weights": normalize_novelty_weights(raw.get("novelty_weights")),
+    }
+
+
+def resolve_coverage_config(global_cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    if global_cfg is None:
+        return normalize_coverage_config(None)
+    coverage_cfg = global_cfg.get("coverage")
+    if coverage_cfg is None:
+        return normalize_coverage_config(None)
+    if not isinstance(coverage_cfg, Mapping):
+        raise ValueError("coverage config must be a mapping")
+    return normalize_coverage_config(coverage_cfg)
 
 
 def _to_box_config(value: BoxConfig | Mapping[str, Any]) -> BoxConfig:

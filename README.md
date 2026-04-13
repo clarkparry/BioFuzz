@@ -46,8 +46,10 @@ Notes for this machine:
 - The unit test suite, runtime audit, bundled reference-ligand docking checks, and a one-iteration CLI run all succeed locally from `.venv` after installing the repo-local Vina binary.
 - `pytest` now includes a bounded live CLI regression against the checked-in `hiv_protease` target when RDKit, Meeko, and Vina are available, so the real end-to-end docking path is exercised during normal verification instead of only through ad hoc smoke commands.
 - New run state is checkpointed under `runs/<stamp>_<target>/corpus/state.json` with a mirrored legacy `corpus.json` snapshot kept for resume compatibility.
+- `coverage.json` is now a versioned hashed-fingerprint checkpoint containing the current/previous novelty maps, epoch, occupancy metadata, stable pocket residue mapping, and novelty counters for resume compatibility.
 - The main loop now behaves like a persistent AFL-style queue: by default it keeps running until the user presses `Ctrl-C`, requeues previously seen corpus entries, and uses a power schedule to spend larger mutation budgets on inputs with better novelty/affinity/find history.
-- A low-overhead terminal UI is enabled automatically on TTY runs and shows the current target, total docks, docks/sec, corpus size, finds, GPU status, scheduler power, mutation stage/type, best affinity, and checkpoint count.
+- A low-overhead terminal UI is enabled automatically on TTY runs and shows the current target, total docks, docks/sec, corpus size, finds, GPU status, scheduler power, mutation stage/type, best affinity, checkpoint count, bitmap occupancy, coverage epoch, and cumulative strong/weak/none novelty counts.
+- Interactive TUI redraws are coalesced behind the configured refresh window instead of repainting for every internal state transition, while a dedicated one-second TUI heartbeat keeps runtime/staleness timers advancing even during long dock waits.
 - Bundled prepared targets now include `hiv_protease`, `egfr_kinase`, `parp1`, `sars_cov2_mpro`, and `braf_v600e`, each with a checked-in receptor `protein.pdbqt`, `config.py`, and reference inhibitor files.
 - BioFuzz still prefers a system `gnina`/`vina`/`quickvina2`/`quickvina-w` when one exists, but no longer depends on a system-wide installation for local verification.
 
@@ -62,6 +64,7 @@ Example live run:
 ```bash
 .venv/bin/python main.py --target parp1 --engine vina
 # runs until Ctrl-C, checkpoints on interrupt, and shows the AFL-style TUI on a TTY
+# timer fields still update once per second, but redraws are throttled to avoid excess terminal churn
 ```
 
 ---
@@ -88,7 +91,7 @@ The goal is to use these outputs to drive iterative mutation of the molecular co
 | Program under test | Protein (e.g., viral protease) |
 | Input | Molecule (SMILES/PDBQT) |
 | Execution | AutoDock Vina / Gnina docking run |
-| Code coverage (edge bitmap) | Residue contact fingerprint |
+| Code coverage (edge bitmap) | Hashed residue-contact fingerprint |
 | Crash | High-affinity, selective binder |
 | Crash deduplication | Binding mode clustering |
 | Mutation (bit flip, splice) | Fragment swap, R-group change, ring mutation |
@@ -96,7 +99,7 @@ The goal is to use these outputs to drive iterative mutation of the molecular co
 | Seed corpus | ZINC20 drug-like subset |
 | Havoc stage | Multi-step stochastic chemical mutation |
 | Sanitizer / oracle | Off-target selectivity check |
-| Coverage map | Pocket contact bitmask (per residue) |
+| Coverage map | Hashed fingerprint bitmap |
 
 The key difference from existing virtual screening: **feedback**. Traditional docking screens a library passively. BioFuzz uses each docking result to steer the next round of mutations, concentrating exploration on productive chemical regions — exactly as AFL concentrates fuzzing on paths leading to new coverage.
 
@@ -181,11 +184,11 @@ SMILES is the lingua franca of the mutation engine: molecules are read, mutated,
 │                 │           │                       │
 │  Parse pose →   │           │  Affinity threshold   │
 │  residue        │           │  Off-target dock      │
-│  contact bitmap │           │  Selectivity ratio    │
-│                 │           │  Strain energy check  │
-│  New bits? →    │           │                       │
-│  add to corpus  │           │  Hit? → save to       │
-│  + reprioritize │           │  findings corpus      │
+│  fingerprint    │           │  Selectivity ratio    │
+│  + hashed       │           │  Strain energy check  │
+│  novelty class  │           │                       │
+│  score corpus   │           │  Hit? → save to       │
+│  + report union │           │  findings corpus      │
 └─────────────────┘           └───────────────────────┘
 ```
 
@@ -193,19 +196,42 @@ SMILES is the lingua franca of the mutation engine: molecules are read, mutated,
 
 ## Coverage Metric
 
-Coverage in BioFuzz is a **residue contact fingerprint** — a bitmask over the residues of the binding pocket.
+Coverage in BioFuzz is now a **hashed fingerprint bitmap** used for seed triage, corpus priority, mutation power scheduling, and runtime reporting.
 
 ### Construction
 
 1. Define the active site residues. For a typical small-molecule binding pocket, this is ~15–30 residues. These are identified once, manually, by inspecting the protein structure in PyMOL or ChimeraX.
 2. After each docking run, parse the output pose. For every heavy atom of the ligand, compute distances to every residue of the defined pocket.
 3. A residue is considered "contacted" if any of its atoms are within **3.5 Å** of any ligand heavy atom.
-4. Produce a bitstring: `bit[i] = 1` if residue `i` was contacted, else `0`.
-5. XOR against the global coverage map. Any new `1` bits = new coverage.
+4. Build the residue contact fingerprint as a `frozenset[int]` of contacted pocket residue IDs.
+5. Map pocket residues into a stable local bit order once per target, then convert each fingerprint into an exact integer bitmask.
+6. Hash that bitmask into a fixed-size bitmap index using a deterministic 64-bit mixing step.
+7. Classify novelty against a windowed epoch bitmap:
+   - unseen in both maps = `strong`
+   - unseen in `current` but seen in `previous` = `weak`
+   - already present in `current` = `none`
+8. Rotate the epoch when bitmap occupancy crosses the configured threshold so novelty pressure remains useful in long campaigns.
 
 ### Prioritization
 
-Molecules that set new bits in the coverage map are added to the corpus and given higher mutation priority — exactly as AFL prioritizes inputs that discover new edges. Molecules that produce no new coverage are still stored (may be useful for later splicing) but given lower priority.
+By default, BioFuzz converts novelty classes into scheduler weights:
+
+- `strong` → `2`
+- `weak` → `1`
+- `none` → `0`
+
+That `novelty_score` is now the primary coverage term used by the scheduler. The legacy `new_bits` field only remains as a compatibility fallback for older corpus checkpoint entries that predate hashed novelty.
+
+### Persistence
+
+`coverage.json` persists enough state to resume novelty tracking without losing epoch-window memory:
+
+- current and previous novelty bitmaps
+- epoch and current occupancy count
+- pocket residue IDs and their stable local bit mapping
+- novelty counters
+
+Legacy union-only checkpoints are still accepted on load and upgraded in memory to the new model.
 
 ### Extended Coverage Signals
 
@@ -410,14 +436,23 @@ BioFuzz now ships `.agent/tools/prepare_target_fixture.py`, which downloads co-c
 5. Download ZINC20 seed subset (10,000–100,000 SMILES) as the initial corpus.
 6. (Optional) Define off-target protein for selectivity oracle — prepare it the same way.
 
-### Step 1: Seed Preparation
+### Step 1: Seed Triage
 
 ```python
 for smiles in seed_corpus:
-    mol = prepare_molecule(smiles)     # RDKit: parse, sanitize, embed 3D
-    if mol is None: continue
-    pdbqt = to_pdbqt(mol)             # Meeko conversion
-    corpus.add(pdbqt, smiles, priority=1.0)
+    pdbqt = prepare_molecule_to_pdbqt(smiles)
+    if pdbqt is None:
+        continue
+
+    result = dock_once(pdbqt)
+    if not result.success:
+        continue
+
+    fingerprint = compute_residue_contacts(result.pose, pocket_residues)
+    observation = coverage_map.observe(fingerprint)
+
+    if observation.novelty_score > 0 or is_hit(result):
+        corpus.add(smiles, priority=score_from(observation.novelty_score, result.affinity))
 ```
 
 ### Step 2: Main Loop
@@ -446,11 +481,9 @@ while True:
         )
         
         # Coverage
-        contacts = compute_residue_contacts(result.pose, pocket_residues)
-        new_bits  = contacts & ~global_coverage_map
-        if new_bits:
-            global_coverage_map |= new_bits
-            corpus.add(mutant, priority=coverage_score(new_bits))
+        fingerprint = compute_residue_contacts(result.pose, pocket_residues)
+        observation = coverage_map.observe(fingerprint)
+        corpus.add(mutant, priority=coverage_score(observation.novelty_score, result.affinity))
         
         # Oracle
         if result.affinity <= AFFINITY_THRESHOLD:
@@ -481,6 +514,12 @@ For all molecules in `findings`:
 | `EXHAUSTIVENESS_FUZZ` | `4` | Vina exhaustiveness during fuzzing |
 | `EXHAUSTIVENESS_CONFIRM` | `16` | Vina exhaustiveness for confirming hits |
 | `CONTACT_DISTANCE_CUTOFF` | `3.5` | Å cutoff for residue contact assignment |
+| `COVERAGE_MODE` | `hashed_fingerprint` | Coverage backend used for novelty tracking |
+| `COVERAGE_MAP_SIZE_KIB` | `256` | Size of each novelty bitmap window |
+| `COVERAGE_ROTATE_THRESHOLD` | `0.55` | Occupancy threshold that triggers epoch rotation |
+| `NOVELTY_WEIGHT_STRONG` | `2` | Scheduler score for unseen fingerprints |
+| `NOVELTY_WEIGHT_WEAK` | `1` | Scheduler score for fingerprints only seen in the previous epoch |
+| `NOVELTY_WEIGHT_NONE` | `0` | Scheduler score for fingerprints already present in the current epoch |
 | `MAX_MOL_WEIGHT` | `550` | Maximum molecular weight (Da) |
 | `MAX_LOGP` | `5.0` | Maximum lipophilicity |
 | `MAX_ROT_BONDS` | `10` | Maximum rotatable bonds |
@@ -528,7 +567,11 @@ At scale, PDBQT preparation (RDKit 3D embedding + Meeko) takes 1–5 seconds per
 
 ### Memory
 
-The coverage bitmap is tiny: 30 residues × 1 bit = 30 bits. Trivial. The corpus can hold millions of SMILES strings in RAM. PDBQT files (~5–20 KB each) should be kept on disk and loaded on demand.
+The novelty bitmap is fixed-size and bounded. At the default configuration, BioFuzz keeps two `256 KiB` maps (`current` and `previous`) plus a small amount of metadata, so hashed coverage costs roughly half a megabyte per run. That is still negligible next to docking runtime and pose/cache storage, while avoiding the early saturation problems of a pure union-only metric. The corpus can still hold very large numbers of SMILES strings in RAM, and PDBQT files (~5–20 KB each) should still be kept on disk and loaded on demand.
+
+### TUI Overhead
+
+The interactive terminal UI is designed to stay out of the hot path. Normal progress, notice, and hit-log updates are throttled by the TUI refresh interval so bursts of internal state changes do not trigger a full-screen repaint each time. A separate one-second heartbeat is kept only to advance timer-derived fields such as total runtime, time since last find, and dock-completion staleness during long blocking docking calls.
 
 ---
 

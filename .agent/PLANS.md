@@ -6,6 +6,10 @@
 
 ## Completed
 
+- `2026-04-13_tui_redraw_throttling_and_heartbeat_deduplication.txt` — made the TUI honor its redraw throttle for normal updates, disabled duplicate fuzzer-side heartbeats during TUI runs, and added regression coverage for redraw coalescing plus one-second timer continuity.
+- `2026-04-13_runtime_tui_hashed_coverage_and_union_removal.txt` — exposed bitmap occupancy/epoch/novelty counts in the TUI using existing runtime counters and removed the old union-only coverage bookkeeping from the live runtime path.
+- `2026-04-13_documentation_sync_for_hashed_coverage.txt` — updated the README and build-structure guide so the documented coverage model, scheduling flow, checkpoint format, and config schema match the implemented hashed fingerprint bitmap behavior.
+- `2026-04-13_hashed_fingerprint_bitmap_coverage.txt` — replaced union-only novelty guidance with a hashed fingerprint bitmap coverage tracker, added epoch-window checkpoint persistence and coverage config validation, and rewired seed/corpus scheduling to use hashed novelty while preserving union coverage reporting.
 - `2026-04-13_parallelism_abort_resilience_and_pool_shutdown_timeout.txt` — hardened manual-abort pool teardown with bounded join + force-kill fallback, added single-worker fallback when pool startup fails, tuned parallel dispatch chunking, and added regression coverage for these paths.
 - `2026-04-12_gnina_dependency_preflight_generalization.txt` — removed machine-local GNINA wrapper workaround and added generalized runtime preflight checks that report exact missing shared libraries for the requested docking engine.
 - `2026-04-12_gnina_runtime_dependency_user_space_cudnn_install.txt` — installed user-space CUDA/cuDNN runtimes into `.venv`, wrapped repo-local GNINA to export NVIDIA lib paths, and fixed GNINA log parsing so live GNINA docking is runnable and triaged correctly without root apt access.

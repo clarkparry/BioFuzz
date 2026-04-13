@@ -1,0 +1,20 @@
+Task: Runtime TUI hashed coverage and union removal
+Date: 2026-04-13
+
+Objective
+- Surface the hashed coverage metric directly in the TUI with effectively zero new runtime cost.
+- Remove the old union-residue coverage path from the live runtime when it is no longer used for scheduling.
+
+Challenges
+- Keep the TUI signal useful without introducing any per-dock work beyond reading existing counters.
+- Remove union-only reporting fields without breaking checkpoint loading, corpus compatibility, or CLI tests.
+
+Approach
+1) Updated `RuntimeStatus`/`FuzzerTUI` to render bitmap occupancy, epoch, and strong/weak/none novelty counters using `CoverageMap` state already maintained in memory.
+2) Removed live union coverage bookkeeping from `biofuzz/core/coverage.py`; the runtime tracker now only maintains hashed novelty state plus pocket mapping.
+3) Kept `CorpusEntry.new_bits` only as a compatibility fallback for older corpus checkpoints; newly generated entries now rely on `novelty_score`.
+4) Removed union-only coverage config/reporting fields from the live config and docs, and updated tests/CLI expectations to the new runtime stats surface.
+
+Validation
+- `./.venv/bin/python -m pytest -q tests/test_coverage.py tests/test_tui.py tests/test_fuzzer.py tests/test_main.py` -> `56 passed`
+- `./.venv/bin/python -m pytest -q` -> `110 passed`

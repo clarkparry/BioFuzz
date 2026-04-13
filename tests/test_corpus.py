@@ -79,6 +79,20 @@ def test_compute_priority_weighted_uses_overrides() -> None:
     assert score == pytest.approx(20.0)
 
 
+def test_compute_priority_weighted_uses_novelty_score_when_present() -> None:
+    score = compute_priority_weighted(
+        new_bits=7,
+        novelty_score=2,
+        affinity=-8.0,
+        times_mutated=0,
+        priority_new_bit_weight=10.0,
+        priority_affinity_weight=1.0,
+        priority_reuse_penalty=0.1,
+    )
+
+    assert score == pytest.approx(23.0)
+
+
 def test_corpus_deduplicates_entries_by_smiles() -> None:
     corpus = Corpus()
     corpus.add(CorpusEntry(smiles="CCO", source_id="seed_1", priority=1.0, new_bits=1))
@@ -108,3 +122,21 @@ def test_power_schedule_increases_budget_for_interesting_entries() -> None:
 
     assert interesting_power > compute_power_score(boring)
     assert interesting_budget > boring_budget
+
+
+def test_power_schedule_prefers_hashed_novelty_score_when_available() -> None:
+    legacy_only = CorpusEntry(
+        smiles="CCO",
+        source_id="seed",
+        priority=1.0,
+        new_bits=5,
+    )
+    hashed = CorpusEntry(
+        smiles="CCN",
+        source_id="seed",
+        priority=1.0,
+        new_bits=5,
+        novelty_score=1,
+    )
+
+    assert compute_power_score(legacy_only) > compute_power_score(hashed)

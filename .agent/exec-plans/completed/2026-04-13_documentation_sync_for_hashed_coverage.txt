@@ -1,0 +1,17 @@
+Task: Documentation sync for hashed coverage
+Date: 2026-04-13
+
+Objective
+- Update the user-facing and build-structure documentation to match the implemented hashed fingerprint bitmap coverage model.
+
+Challenges
+- Align the conceptual README with the more implementation-oriented `BIOFUZZ_STRUCTURE.md` without reintroducing stale union-only language.
+- Reflect the current code accurately for coverage, scheduling, checkpointing, seed triage, and config schema.
+
+Approach
+1) Updated `README.md` to describe the two-layer coverage model (union ratio + hashed novelty bitmap), versioned coverage checkpoints, seed triage, novelty-driven scheduling, the new coverage config knobs, and the bounded bitmap memory model.
+2) Updated `BIOFUZZ_STRUCTURE.md` to reflect the implemented coverage API (`observe(...)`), hashed novelty scoring, `CorpusEntry.novelty_score`, seed-stage triage, `coverage:` config schema, and revised coverage test expectations.
+
+Validation
+- Reviewed the updated markdown sections directly after patching to confirm the old union-only formulas/snippets were removed or replaced in the touched areas.
+- `git diff --check` -> clean

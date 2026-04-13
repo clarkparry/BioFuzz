@@ -34,7 +34,11 @@ def _parse_cli_stats(stdout: str) -> dict[str, str]:
             (
                 "iterations:",
                 "hits:",
-                "coverage_ratio:",
+                "coverage_bitmap_occupancy:",
+                "coverage_epoch:",
+                "novelty_strong_count:",
+                "novelty_weak_count:",
+                "novelty_none_count:",
                 "corpus_size:",
                 "best_affinity:",
                 "total_docks:",
@@ -233,7 +237,11 @@ def test_main_allows_zero_iteration_smoke_run_without_runtime_dependencies(
         return {
             "iterations": 0,
             "hits": 0,
-            "coverage_ratio": 0.0,
+            "coverage_bitmap_occupancy": 0.0,
+            "coverage_epoch": 0,
+            "novelty_strong_count": 0,
+            "novelty_weak_count": 0,
+            "novelty_none_count": 0,
             "corpus_size": 1,
             "best_affinity": 0.0,
         }
@@ -346,7 +354,11 @@ def test_main_passes_resolved_engine_to_tui_and_logs_runtime_notice(
         lambda **kwargs: {
             "iterations": 0,
             "hits": 0,
-            "coverage_ratio": 0.0,
+            "coverage_bitmap_occupancy": 0.0,
+            "coverage_epoch": 0,
+            "novelty_strong_count": 0,
+            "novelty_weak_count": 0,
+            "novelty_none_count": 0,
             "corpus_size": 1,
             "best_affinity": 0.0,
             "total_docks": 0,
@@ -358,6 +370,116 @@ def test_main_passes_resolved_engine_to_tui_and_logs_runtime_notice(
     assert Path(str(tui_init["engine"])).name == "vina"
     assert tui_init["gpu_enabled"] is False
     assert tui_notices == ["gnina unavailable or not runnable; using vina."]
+
+
+def test_main_disables_fuzzer_progress_heartbeat_when_tui_is_enabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("RECEPTOR\n", encoding="utf-8")
+    seeds = tmp_path / "seeds.smi"
+    seeds.write_text("CCO seed_1\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        target="mini",
+        seeds=str(seeds),
+        output=str(tmp_path / "run"),
+        max_iterations=0,
+        workers=1,
+        checkpoint_every=10,
+        mutations_per_entry=1,
+        engine="vina",
+        config=str(tmp_path / "config.yaml"),
+    )
+    global_cfg = {
+        "docking": {
+            "exhaustiveness_fuzz": 4,
+            "exhaustiveness_confirm": 16,
+            "num_modes": 3,
+            "engine": "vina",
+        },
+        "oracle": {
+            "affinity_threshold": -9.0,
+            "strain_threshold": 3.5,
+            "selectivity_ratio_min": 2.0,
+        },
+        "molecules": {
+            "max_mw": 550,
+            "max_logp": 5.0,
+            "max_hbd": 5,
+            "max_hba": 10,
+            "max_rot_bonds": 10,
+            "mutations_per_entry": 20,
+        },
+        "corpus": {
+            "max_size": 50000,
+            "priority_new_bit_weight": 10.0,
+            "priority_affinity_weight": 1.0,
+            "priority_reuse_penalty": 0.1,
+        },
+        "fuzzer": {
+            "workers": 4,
+            "checkpoint_every": 500,
+            "log_level": "INFO",
+        },
+    }
+    target_cfg = TargetConfig(
+        name="mini",
+        receptor=str(receptor),
+        box=BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0),
+        pocket=PocketConfig(residue_ids={1, 2}, contact_cutoff=3.5),
+    )
+
+    run_calls: list[dict[str, object]] = []
+
+    class FakeTUI:
+        def __init__(self, *, target: str, engine: str, workers: int, gpu_enabled: bool) -> None:
+            self.enabled = True
+
+        def log(self, _message: str) -> None:
+            return
+
+        def update(self, _status) -> None:
+            return
+
+        def notice(self, _message: str) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    def fake_run(**kwargs):
+        run_calls.append(kwargs)
+        return {
+            "iterations": 0,
+            "hits": 0,
+            "coverage_bitmap_occupancy": 0.0,
+            "coverage_epoch": 0,
+            "novelty_strong_count": 0,
+            "novelty_weak_count": 0,
+            "novelty_none_count": 0,
+            "corpus_size": 1,
+            "best_affinity": 0.0,
+            "total_docks": 0,
+            "stopped_reason": "max_iterations",
+        }
+
+    monkeypatch.setattr(main_module, "parse_args", lambda: args)
+    monkeypatch.setattr(main_module, "load_global_config", lambda path: global_cfg)
+    monkeypatch.setattr(main_module, "load_target_config", lambda target: target_cfg)
+    monkeypatch.setattr(
+        main_module,
+        "apply_global_defaults_to_target",
+        lambda config, _global_cfg: config,
+    )
+    monkeypatch.setattr(main_module, "FuzzerTUI", FakeTUI)
+    monkeypatch.setattr(main_module, "run", fake_run)
+
+    assert main_module.main() == 0
+    assert len(run_calls) == 1
+    assert run_calls[0]["progress_callback"] is not None
+    assert run_calls[0]["progress_heartbeat_seconds"] == 0.0
 
 
 def test_main_returns_interrupt_exit_code_when_run_stops_on_keyboard_interrupt(
@@ -434,7 +556,11 @@ def test_main_returns_interrupt_exit_code_when_run_stops_on_keyboard_interrupt(
         lambda **kwargs: {
             "iterations": 12,
             "hits": 1,
-            "coverage_ratio": 0.5,
+            "coverage_bitmap_occupancy": 0.5,
+            "coverage_epoch": 1,
+            "novelty_strong_count": 4,
+            "novelty_weak_count": 2,
+            "novelty_none_count": 8,
             "corpus_size": 42,
             "best_affinity": -10.1,
             "total_docks": 17,
@@ -520,7 +646,11 @@ def test_main_returns_failure_exit_code_when_run_reports_failed(
         lambda **kwargs: {
             "iterations": 12,
             "hits": 1,
-            "coverage_ratio": 0.5,
+            "coverage_bitmap_occupancy": 0.5,
+            "coverage_epoch": 1,
+            "novelty_strong_count": 4,
+            "novelty_weak_count": 2,
+            "novelty_none_count": 8,
             "corpus_size": 42,
             "best_affinity": -10.1,
             "total_docks": 17,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from biofuzz.docking.config import (
     DEFAULT_GLOBAL_CONFIG,
     BoxConfig,
@@ -11,6 +13,7 @@ from biofuzz.docking.config import (
     apply_global_defaults_to_target,
     load_global_config,
     load_target_config,
+    resolve_coverage_config,
 )
 
 
@@ -144,6 +147,26 @@ def test_apply_global_defaults_preserves_explicit_default_oracle_values() -> Non
     assert merged.oracle.affinity_threshold == -9.0
     assert merged.oracle.strain_threshold == 2.5
     assert merged.oracle.selectivity_ratio_min == 3.0
+
+
+def test_resolve_coverage_config_supplies_defaults_when_section_missing() -> None:
+    coverage_cfg = resolve_coverage_config({"docking": {"engine": "gnina"}})
+
+    assert coverage_cfg["mode"] == "hashed_fingerprint"
+    assert coverage_cfg["map_size_kib"] == 256
+    assert coverage_cfg["novelty_weights"] == {"strong": 2, "weak": 1, "none": 0}
+
+
+def test_load_global_config_rejects_invalid_coverage_map_size(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "coverage:\n"
+        "  map_size_kib: 250\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="power of two"):
+        load_global_config(config_path)
 
 
 def test_bundled_targets_load_with_prepared_assets() -> None:

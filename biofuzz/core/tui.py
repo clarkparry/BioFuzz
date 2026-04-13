@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import threading
 import time
 from typing import TextIO
 
@@ -32,7 +33,11 @@ class RuntimeStatus:
     completed_dock_staleness_seconds: float | None
     corpus_size: int
     finds: int
-    coverage_ratio: float
+    coverage_bitmap_occupancy: float
+    coverage_epoch: int
+    novelty_strong_count: int
+    novelty_weak_count: int
+    novelty_none_count: int
     best_affinity: float | None
     checkpoints: int
     elapsed_seconds: float
@@ -48,6 +53,7 @@ class FuzzerTUI:
         gpu_enabled: bool,
         stream: TextIO | None = None,
         refresh_seconds: float = 0.25,
+        heartbeat_seconds: float = 1.0,
         enabled: bool | None = None,
     ) -> None:
         self.target = target
@@ -56,86 +62,130 @@ class FuzzerTUI:
         self.gpu_enabled = gpu_enabled
         self.stream = stream or sys.stdout
         self.refresh_seconds = max(0.05, refresh_seconds)
+        self.heartbeat_seconds = max(0.0, heartbeat_seconds)
         self.enabled = bool(enabled) if enabled is not None else self.stream.isatty()
         self._run_log: deque[str] = deque(maxlen=10)
         self._last_render = 0.0
         self._cursor_hidden = False
         self._alt_screen_active = False
         self._status: RuntimeStatus | None = None
+        self._status_received_monotonic: float | None = None
         self._last_find_elapsed_seconds: float | None = None
+        self._lock = threading.RLock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        if self.enabled and self.heartbeat_seconds > 0.0:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="biofuzz_tui_heartbeat",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(self.heartbeat_seconds):
+            self.render(force=True)
+
+    def _effective_elapsed_seconds(self, status: RuntimeStatus) -> float:
+        if self._status_received_monotonic is None:
+            return status.elapsed_seconds
+        return max(0.0, status.elapsed_seconds + (time.monotonic() - self._status_received_monotonic))
+
+    def _effective_completed_dock_staleness_seconds(
+        self,
+        status: RuntimeStatus,
+    ) -> float | None:
+        if status.completed_dock_staleness_seconds is None:
+            return None
+        if self._status_received_monotonic is None:
+            return status.completed_dock_staleness_seconds
+        return max(
+            0.0,
+            status.completed_dock_staleness_seconds
+            + (time.monotonic() - self._status_received_monotonic),
+        )
 
     def log(self, message: str) -> None:
-        if not self.enabled:
-            print(message, file=self.stream)
-            return
-        text = message.strip()
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
-        hit_match = HIT_LOG_RE.match(text)
-        if hit_match is not None:
-            smiles = hit_match.group("smiles")
-            affinity_raw = hit_match.group("affinity")
-            try:
-                affinity = f"{float(affinity_raw):.2f}"
-            except ValueError:
-                affinity = affinity_raw
-            self._run_log.appendleft(f"{timestamp}  {smiles}  {affinity}")
-            if self._status is not None:
-                self._last_find_elapsed_seconds = self._status.elapsed_seconds
-            self.render(force=True)
-            return
+        with self._lock:
+            if not self.enabled:
+                print(message, file=self.stream)
+                return
+            text = message.strip()
+            timestamp = time.strftime("%H:%M:%S", time.localtime())
+            hit_match = HIT_LOG_RE.match(text)
+            if hit_match is not None:
+                smiles = hit_match.group("smiles")
+                affinity_raw = hit_match.group("affinity")
+                try:
+                    affinity = f"{float(affinity_raw):.2f}"
+                except ValueError:
+                    affinity = affinity_raw
+                self._run_log.appendleft(f"{timestamp}  {smiles}  {affinity}")
+                if self._status is not None:
+                    self._last_find_elapsed_seconds = self._effective_elapsed_seconds(self._status)
+                self.render()
+                return
 
-        fallback_match = SEED_FALLBACK_LOG_RE.match(text)
-        if fallback_match is not None:
-            self._run_log.appendleft(f"{timestamp}  [SEED][FALLBACK] {fallback_match.group('message')}")
-            self.render(force=True)
+            fallback_match = SEED_FALLBACK_LOG_RE.match(text)
+            if fallback_match is not None:
+                self._run_log.appendleft(f"{timestamp}  [SEED][FALLBACK] {fallback_match.group('message')}")
+                self.render()
 
     def notice(self, message: str) -> None:
-        text = message.strip()
-        if not text:
-            return
-        if not self.enabled:
-            print(f"[INFO] {text}", file=self.stream)
-            return
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
-        self._run_log.appendleft(f"{timestamp}  [INFO] {text}")
-        self.render(force=True)
+        with self._lock:
+            text = message.strip()
+            if not text:
+                return
+            if not self.enabled:
+                print(f"[INFO] {text}", file=self.stream)
+                return
+            timestamp = time.strftime("%H:%M:%S", time.localtime())
+            self._run_log.appendleft(f"{timestamp}  [INFO] {text}")
+            self.render()
 
     def update(self, status: RuntimeStatus) -> None:
-        self._status = status
-        self.render(force=True)
+        with self._lock:
+            self._status = status
+            self._status_received_monotonic = time.monotonic()
+            self.render()
 
     def render(self, force: bool = False) -> None:
-        if not self.enabled or self._status is None:
-            return
-        now = time.monotonic()
-        if not force and now - self._last_render < self.refresh_seconds:
-            return
-        self._last_render = now
+        with self._lock:
+            if not self.enabled or self._status is None:
+                return
+            now = time.monotonic()
+            if not force and now - self._last_render < self.refresh_seconds:
+                return
+            self._last_render = now
 
-        width = max(72, min(120, shutil.get_terminal_size((100, 24)).columns))
-        lines = self._build_lines(width)
+            width = max(72, min(120, shutil.get_terminal_size((100, 24)).columns))
+            lines = self._build_lines(width)
 
-        if not self._alt_screen_active:
-            self.stream.write("\x1b[?1049h")
-            self._alt_screen_active = True
-        if not self._cursor_hidden:
-            self.stream.write("\x1b[?25l")
-            self._cursor_hidden = True
-        self.stream.write("\x1b[H\x1b[2J")
-        self.stream.write("\n".join(lines))
-        self.stream.flush()
+            if not self._alt_screen_active:
+                self.stream.write("\x1b[?1049h")
+                self._alt_screen_active = True
+            if not self._cursor_hidden:
+                self.stream.write("\x1b[?25l")
+                self._cursor_hidden = True
+            self.stream.write("\x1b[H\x1b[2J")
+            self.stream.write("\n".join(lines))
+            self.stream.flush()
 
     def close(self) -> None:
-        if not self.enabled:
-            return
-        self.render(force=True)
-        if self._cursor_hidden:
-            self.stream.write("\x1b[?25h")
-            self._cursor_hidden = False
-        if self._alt_screen_active:
-            self.stream.write("\x1b[?1049l")
-            self._alt_screen_active = False
-        self.stream.flush()
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=max(0.1, self.heartbeat_seconds * 2.0))
+        with self._lock:
+            if not self.enabled:
+                return
+            self.render(force=True)
+            if self._cursor_hidden:
+                self.stream.write("\x1b[?25h")
+                self._cursor_hidden = False
+            if self._alt_screen_active:
+                self.stream.write("\x1b[?1049l")
+                self._alt_screen_active = False
+            self.stream.flush()
 
     def _build_lines(self, width: int) -> list[str]:
         status = self._status
@@ -222,9 +272,11 @@ class FuzzerTUI:
             lines.append(divider)
 
         divider = "+" + ("-" * (width - 2)) + "+"
+        current_elapsed_seconds = self._effective_elapsed_seconds(status)
         since_last_find_seconds: float | None = None
         if self._last_find_elapsed_seconds is not None:
-            since_last_find_seconds = max(0.0, status.elapsed_seconds - self._last_find_elapsed_seconds)
+            since_last_find_seconds = max(0.0, current_elapsed_seconds - self._last_find_elapsed_seconds)
+        completed_dock_staleness_seconds = self._effective_completed_dock_staleness_seconds(status)
 
         lines = [divider, box(paint(f"BioFuzz :: {self.target}", "1", "34")), divider]
 
@@ -232,7 +284,7 @@ class FuzzerTUI:
             lines,
             "Process Info",
             [
-                f"{field('Runtime', fmt_duration(status.elapsed_seconds))}  "
+                f"{field('Runtime', fmt_duration(current_elapsed_seconds))}  "
                 f"{field('Since Last Find', fmt_duration(since_last_find_seconds))}",
                 f"{field('Engine', Path(self.engine).name)}  "
                 f"{field('GPU', self._gpu_status_label(status.gpu_active))}  "
@@ -245,8 +297,13 @@ class FuzzerTUI:
             "Overall Results",
             [
                 f"{finds_field(status.finds)}  "
-                f"{field('Coverage', f'{status.coverage_ratio:.3f}')}  "
+                f"{field('Bitmap Occ', f'{status.coverage_bitmap_occupancy:.3f}')}  "
+                f"{field('Epoch', str(status.coverage_epoch))}  "
                 f"{field('Checkpoints', str(status.checkpoints))}",
+                field(
+                    "Novelty S/W/N",
+                    f"{status.novelty_strong_count}/{status.novelty_weak_count}/{status.novelty_none_count}",
+                ),
             ],
             divider,
         )
@@ -255,7 +312,7 @@ class FuzzerTUI:
             "Progress",
             [
                 f"{field('Attempted Docks', str(status.total_docks))}  "
-                f"{colored_field('Completed Docks', str(status.completed_docks), completed_dock_color(status.completed_dock_staleness_seconds))}  "
+                f"{colored_field('Completed Docks', str(status.completed_docks), completed_dock_color(completed_dock_staleness_seconds))}  "
                 f"{field('Docks/sec', f'{status.docks_per_sec:.2f}')}",
                 field("Corpus Size", str(status.corpus_size)),
             ],
