@@ -14,6 +14,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 HIT_LOG_RE = re.compile(
     r"^\[HIT\]\s+(?P<smiles>\S+)\s+\|\s+affinity=(?P<affinity>-?\d+(?:\.\d+)?)"
 )
+SEED_FALLBACK_LOG_RE = re.compile(r"^\[SEED\]\[FALLBACK\]\s+(?P<message>.+)$")
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,9 @@ class RuntimeStatus:
     power_score: float
     mutation_budget: int
     total_docks: int
+    completed_docks: int
     docks_per_sec: float
+    completed_dock_staleness_seconds: float | None
     corpus_size: int
     finds: int
     coverage_ratio: float
@@ -64,20 +67,26 @@ class FuzzerTUI:
         if not self.enabled:
             print(message, file=self.stream)
             return
-        match = HIT_LOG_RE.match(message.strip())
-        if match is None:
-            return
-        smiles = match.group("smiles")
-        affinity_raw = match.group("affinity")
-        try:
-            affinity = f"{float(affinity_raw):.2f}"
-        except ValueError:
-            affinity = affinity_raw
+        text = message.strip()
         timestamp = time.strftime("%H:%M:%S", time.localtime())
-        self._run_log.appendleft(f"{timestamp}  {smiles}  {affinity}")
-        if self._status is not None:
-            self._last_find_elapsed_seconds = self._status.elapsed_seconds
-        self.render(force=True)
+        hit_match = HIT_LOG_RE.match(text)
+        if hit_match is not None:
+            smiles = hit_match.group("smiles")
+            affinity_raw = hit_match.group("affinity")
+            try:
+                affinity = f"{float(affinity_raw):.2f}"
+            except ValueError:
+                affinity = affinity_raw
+            self._run_log.appendleft(f"{timestamp}  {smiles}  {affinity}")
+            if self._status is not None:
+                self._last_find_elapsed_seconds = self._status.elapsed_seconds
+            self.render(force=True)
+            return
+
+        fallback_match = SEED_FALLBACK_LOG_RE.match(text)
+        if fallback_match is not None:
+            self._run_log.appendleft(f"{timestamp}  [SEED][FALLBACK] {fallback_match.group('message')}")
+            self.render(force=True)
 
     def notice(self, message: str) -> None:
         text = message.strip()
@@ -173,6 +182,21 @@ class FuzzerTUI:
         def field(name: str, value: str) -> str:
             return f"{label(name)}: {value}"
 
+        def colored_field(name: str, value: str, color_code: str | None) -> str:
+            if color_code is None:
+                return field(name, value)
+            return f"{paint(name, '1', color_code)}: {paint(value, color_code)}"
+
+        def completed_dock_color(staleness_seconds: float | None) -> str | None:
+            if staleness_seconds is None or staleness_seconds < 15.0:
+                return None
+            if staleness_seconds >= 60.0:
+                return "31"
+            if staleness_seconds >= 30.0:
+                # xterm orange
+                return "38;5;208"
+            return "33"
+
         def finds_field(value: int) -> str:
             return f"{red_label('Finds')}: {red_value(str(value))}"
 
@@ -229,7 +253,8 @@ class FuzzerTUI:
             lines,
             "Progress",
             [
-                f"{field('Total Docks', str(status.total_docks))}  "
+                f"{field('Attempted Docks', str(status.total_docks))}  "
+                f"{colored_field('Completed Docks', str(status.completed_docks), completed_dock_color(status.completed_dock_staleness_seconds))}  "
                 f"{field('Docks/sec', f'{status.docks_per_sec:.2f}')}",
                 field("Corpus Size", str(status.corpus_size)),
             ],

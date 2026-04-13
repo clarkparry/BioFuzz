@@ -1,0 +1,44 @@
+Task: seed fallback bootstrap, dock-attempt telemetry, and runtime resilience for unrunnable GNINA
+
+Problem
+- A full HIV protease seed pass stopped with `empty_corpus` even after thousands of dock calls.
+- The UI only reported aggregate dock count, so runtime/tool failures were hard to distinguish from true search failures.
+- The bundled repo-local GNINA binary was selected when present even when it could not start (missing shared libs), producing repeated failed docks.
+- About ~1.4k of a 10k seed file were dropped before docking due strict pre-docking drug-like gating.
+
+Challenges
+- Keep existing fuzz-loop behavior stable while adding new telemetry fields and TUI status signals.
+- Preserve backward-compatible run stats keys and tests while introducing attempted/completed dock semantics.
+- Add fallback corpus bootstrapping without disabling the existing “interesting seed” scoring path.
+- Improve binary selection robustness without breaking existing binary-resolution tests and expected fallback order.
+
+Approach
+1) Seed bootstrap fallback
+- Added `SEED_FALLBACK_MIN_INTERESTING=64` and `SEED_FALLBACK_TOP_K=256` in `biofuzz/core/fuzzer.py`.
+- When seed triage yields fewer than `N` interesting seeds, retain top-`K` successful seed docks by best affinity to bootstrap corpus continuity.
+- Emit `[SEED][FALLBACK] ...` log entries so fallback activation is visible in the run log.
+
+2) Dock attempt/completion telemetry
+- Split dock accounting into attempted vs completed dock counters.
+- `total_docks` remains as attempted-dock alias for compatibility; added explicit `attempted_docks` and `completed_docks` stats.
+- `docks/sec` now uses completed docks per second.
+- Updated selectivity observer path so extra docks contribute to attempted/completed accounting with real results.
+
+3) TUI progress/health signals
+- Progress panel now shows `Attempted Docks` and `Completed Docks`.
+- `Completed Docks` label/value color reflects staleness:
+  - yellow: 15-29s since last completed dock
+  - orange: 30-59s
+  - red: >=60s
+- Run log now records `[SEED][FALLBACK]` events.
+
+4) GNINA runnability and seed-drop fixes
+- Added runnability probe for repo-local binaries in `biofuzz/docking/runner.py`.
+- If repo-local GNINA exists but is not runnable (e.g., missing `libcudnn.so.9`), resolution now skips it and falls back to next available engine (e.g., Vina).
+- Seed preparation now retries once with `require_drug_like=False` (and fallback prep enabled) when strict gate fails, preventing large silent seed losses from strict pre-screening.
+- Seed summary logging now reports prep/dock/parse counters for transparent accounting.
+
+Validation
+- Updated and extended tests across runner, fuzzer, TUI, and main CLI paths.
+- Full test suite passes (`81 passed`).
+- Manual CLI check with `--engine gnina` now logs fallback to Vina and proceeds with completed dock accounting.

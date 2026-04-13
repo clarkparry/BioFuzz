@@ -6,6 +6,7 @@ from typing import Sequence
 
 from biofuzz.docking.config import OracleConfig, TargetConfig
 from biofuzz.docking.parser import DockingMode
+from biofuzz.docking.runner import DockingResult
 from biofuzz.oracle.selectivity import selectivity_ratio_from_target
 from biofuzz.oracle.strain import passes_strain
 
@@ -37,7 +38,7 @@ def evaluate(
     selectivity_exhaustiveness: int = 8,
     num_modes: int = 3,
     docking_engine: str = "gnina",
-    dock_observer: Callable[[], None] | None = None,
+    dock_observer: Callable[[DockingResult], None] | None = None,
 ) -> OracleVerdict:
     oracle_cfg = _oracle_config(config)
     affinity = modes[0].affinity if modes else float("inf")

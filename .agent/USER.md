@@ -43,3 +43,34 @@
 - Added defensive handling for `BrokenPipeError`/`EPIPE` while collecting pool results; this is now treated as a manual abort path instead of campaign failure when interrupting.
 - During manual abort teardown, SIGINT is temporarily ignored to prevent repeated Ctrl-C from interrupting cleanup/checkpoint writes and surfacing noisy pipe exceptions.
 - Final checkpoint-save errors after manual abort are now warnings and do not change `stopped_reason` away from `keyboard_interrupt`.
+
+## 2026-04-12 - Seed fallback corpus bootstrap, dock telemetry split, and GNINA runtime fallback
+
+- Added a seed-stage continuity fallback in `biofuzz/core/fuzzer.py`: if fewer than 64 seeds are triaged as "interesting", BioFuzz now retains up to the top 256 successfully docked seeds by affinity so fuzzing can continue from a non-empty corpus.
+- Added explicit run-log signaling when this fallback is used via `[SEED][FALLBACK] ...`; the TUI run log now surfaces this entry.
+- Split dock accounting into attempted vs completed docks and wired both into progress/status output.
+  - `Attempted Docks` increments on every dock call attempt.
+  - `Completed Docks` increments only when the docking subprocess completes successfully at the process/runtime layer.
+  - `Docks/sec` now reports completed-docks/sec.
+- Added TUI health coloring for stalled completion throughput:
+  - yellow at 15-29s without a completed dock
+  - orange at 30-59s
+  - red at >=60s
+- Hardened engine resolution in `biofuzz/docking/runner.py` so unrunnable repo-local binaries are skipped. This addresses the observed GNINA runtime failure (`libcudnn.so.9` missing) by automatically falling back to a runnable engine when available.
+- Addressed the "missing seeds" gap by retrying seed preparation without strict drug-like gating when strict preparation rejects a seed, while keeping mutation-stage constraints unchanged.
+
+## 2026-04-12 - GNINA dependency install and parser compatibility on non-root host
+
+- Installed CUDA/cuDNN runtime libraries in user space via `.venv` NVIDIA wheels (`cudnn`, `cudart`, `cublas`, `cusolver`, `cusparse`, `cufft`) because root-level apt install was unavailable in this session.
+- Replaced `.agent/tools/bin/gnina` with a wrapper script that exports `LD_LIBRARY_PATH` to `.venv` NVIDIA library directories before executing the original binary (`gnina.bin`).
+- Verified `gnina --help` and live GNINA docking now run successfully on this host.
+- Fixed docking-log parsing compatibility for GNINA's five-column mode table in `biofuzz/docking/parser.py`, and added regression test coverage in `tests/test_parser.py`.
+
+## 2026-04-12 - GNINA runtime preflight generalized and machine-local workaround reverted
+
+- Reverted the machine-specific GNINA launcher wrapper and user-space CUDA/cuDNN injection workaround so behavior no longer depends on local manual path shims.
+- Added generalized runtime dependency probing for requested docking engines:
+  - `resolve_requested_binary(engine)` resolves the exact requested engine.
+  - `runtime_issues_for_binary(path)` detects startup/runtime issues (including missing shared libraries).
+- Updated CLI preflight to fail early with actionable dependency details when runtime libs are missing (for example, `gnina runtime (missing shared libraries: libcudnn.so.9)`).
+- This dependency check is now portable across users/machines and does not rely on host-specific wrappers.

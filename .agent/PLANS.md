@@ -6,6 +6,9 @@
 
 ## Completed
 
+- `2026-04-12_gnina_dependency_preflight_generalization.txt` — removed machine-local GNINA wrapper workaround and added generalized runtime preflight checks that report exact missing shared libraries for the requested docking engine.
+- `2026-04-12_gnina_runtime_dependency_user_space_cudnn_install.txt` — installed user-space CUDA/cuDNN runtimes into `.venv`, wrapped repo-local GNINA to export NVIDIA lib paths, and fixed GNINA log parsing so live GNINA docking is runnable and triaged correctly without root apt access.
+- `2026-04-12_seed_fallback_dock_telemetry_and_engine_resilience.txt` — added top-K seed fallback bootstrap, attempted-vs-completed dock telemetry with TUI staleness signaling, repo-local GNINA runnability fallback, and seed-preparation retry logic that prevents large pre-dock seed drops.
 - `2026-04-12_spam_ctrl_c_seed_abort_hardening.txt` — hardened spammed `Ctrl-C` behavior so seed-stage aborts follow the same graceful stop/report/checkpoint flow as regular fuzzing.
 - `2026-04-12_seed_stage_keyboard_interrupt_alignment.txt` — aligned seed-stage `Ctrl-C` abort handling with the regular fuzzing shutdown path so manual aborts save checkpoints and produce normal run summaries.
 - `2026-04-12_seed_docking_corpus_bootstrap.txt` — replaced startup seed-to-corpus bulk loading with docking-based seed triage so only interesting seeds enter the corpus before the normal fuzzing loop.

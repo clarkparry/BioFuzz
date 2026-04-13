@@ -23,6 +23,9 @@ from biofuzz.protein.residues import load_residue_coordinates
 from biofuzz.storage.cache import PDBQTCache
 from biofuzz.storage.findings import FindingsStore
 
+SEED_FALLBACK_MIN_INTERESTING = 64
+SEED_FALLBACK_TOP_K = 256
+
 
 def load_smiles(seed_smiles_path: str | Path) -> list[tuple[str, str]]:
     entries: list[tuple[str, str]] = []
@@ -173,6 +176,7 @@ def _dock_worker(payload: tuple[int, str, TargetConfig, int, int, str]) -> tuple
             log_text="",
             pose_path=None,
             error="Docking interrupted by user",
+            completed=False,
         )
     return idx, result
 
@@ -206,6 +210,12 @@ def _save_corpus_checkpoints(corpus: Corpus, checkpoint_paths: tuple[Path, Path]
     primary_checkpoint, legacy_checkpoint = checkpoint_paths
     corpus.save(primary_checkpoint)
     corpus.save(legacy_checkpoint)
+
+
+def _dock_completed(result: DockingResult) -> bool:
+    if result.completed is not None:
+        return result.completed
+    return result.success
 
 
 def run(
@@ -253,11 +263,41 @@ def run(
     current_power_score = 1.0
     current_budget = mutations_per_entry
     checkpoint_count = 0
-    total_docks = 0
+    attempted_docks = 0
+    completed_docks = 0
+    first_attempt_elapsed_seconds: float | None = None
+    last_completed_dock_elapsed_seconds: float | None = None
+
+    def record_dock_attempts(count: int = 1) -> None:
+        nonlocal attempted_docks, first_attempt_elapsed_seconds
+        if count <= 0:
+            return
+        attempted_docks += count
+        if first_attempt_elapsed_seconds is None:
+            first_attempt_elapsed_seconds = elapsed_seconds()
+
+    def record_dock_completion(result: DockingResult) -> None:
+        nonlocal completed_docks, last_completed_dock_elapsed_seconds
+        if _dock_completed(result):
+            completed_docks += 1
+            last_completed_dock_elapsed_seconds = elapsed_seconds()
 
     def emit_progress(force_stage: str | None = None) -> None:
         if progress_callback is None:
             return
+        elapsed = elapsed_seconds()
+        completed_dock_staleness_seconds: float | None = None
+        if attempted_docks > 0:
+            if completed_docks > 0 and last_completed_dock_elapsed_seconds is not None:
+                completed_dock_staleness_seconds = max(
+                    0.0,
+                    elapsed - last_completed_dock_elapsed_seconds,
+                )
+            elif first_attempt_elapsed_seconds is not None:
+                completed_dock_staleness_seconds = max(
+                    0.0,
+                    elapsed - first_attempt_elapsed_seconds,
+                )
         progress_callback(
             RuntimeStatus(
                 stage=force_stage or current_stage,
@@ -267,20 +307,22 @@ def run(
                 current_smiles=current_smiles,
                 power_score=current_power_score,
                 mutation_budget=current_budget,
-                total_docks=total_docks,
-                docks_per_sec=(total_docks / elapsed_seconds()) if total_docks else 0.0,
+                total_docks=attempted_docks,
+                completed_docks=completed_docks,
+                docks_per_sec=(completed_docks / elapsed) if completed_docks else 0.0,
+                completed_dock_staleness_seconds=completed_dock_staleness_seconds,
                 corpus_size=corpus.size(),
                 finds=hits,
                 coverage_ratio=cov_map.coverage_ratio(),
                 best_affinity=best_affinity,
                 checkpoints=checkpoint_count,
-                elapsed_seconds=elapsed_seconds(),
+                elapsed_seconds=elapsed,
             )
         )
 
-    def observe_extra_dock() -> None:
-        nonlocal total_docks
-        total_docks += 1
+    def observe_extra_dock(result: DockingResult) -> None:
+        record_dock_attempts()
+        record_dock_completion(result)
         emit_progress()
 
     corpus = Corpus(max_size=max_corpus_size)
@@ -352,6 +394,16 @@ def run(
         try:
             seed_total = 0
             seed_interesting = 0
+            seed_prepare_failed = 0
+            seed_prepare_relaxed = 0
+            seed_dock_failed = 0
+            seed_parse_failed = 0
+            seed_non_interesting = 0
+            seed_fallback_added = 0
+            seed_attempted = 0
+            seed_completed = 0
+            seed_successful_candidates: list[tuple[float, str, str, int, int]] = []
+            interesting_smiles: set[str] = set()
             log("[SEED] docking seeds to build initial corpus")
             for smiles, source_id in load_smiles(seed_smiles_path):
                 seed_total += 1
@@ -372,14 +424,32 @@ def run(
                         max_hbd=molecule_max_hbd,
                         max_hba=molecule_max_hba,
                         max_rot_bonds=molecule_max_rot_bonds,
+                        allow_fallback=True,
                     )
                     if pdbqt is None:
+                        pdbqt = prepare_smiles(
+                            smiles,
+                            require_drug_like=False,
+                            min_mw=molecule_min_mw,
+                            max_mw=molecule_max_mw,
+                            max_logp=molecule_max_logp,
+                            max_hbd=molecule_max_hbd,
+                            max_hba=molecule_max_hba,
+                            max_rot_bonds=molecule_max_rot_bonds,
+                            allow_fallback=True,
+                        )
+                        if pdbqt is not None:
+                            seed_prepare_relaxed += 1
+                    if pdbqt is None:
+                        seed_prepare_failed += 1
                         continue
                     cache.set(smiles, pdbqt)
                     cached = pdbqt
 
                 current_stage = "seed_dock"
                 emit_progress()
+                record_dock_attempts()
+                seed_attempted += 1
                 result = dock(
                     cached,
                     target_config,
@@ -387,15 +457,19 @@ def run(
                     num_modes=num_modes,
                     engine=engine,
                 )
-                total_docks += 1
+                record_dock_completion(result)
+                if _dock_completed(result):
+                    seed_completed += 1
                 emit_progress("seed_dock")
 
                 if not result.success or not result.pose_path:
+                    seed_dock_failed += 1
                     _cleanup_pose_path(result.pose_path)
                     continue
 
                 pose_file = Path(result.pose_path)
                 if not pose_file.exists():
+                    seed_dock_failed += 1
                     _cleanup_pose_path(result.pose_path)
                     continue
 
@@ -404,6 +478,7 @@ def run(
                     modes = parse_log(result.log_text)
                     atoms = parse_pose(pose_text)
                     if not modes or not atoms:
+                        seed_parse_failed += 1
                         continue
 
                     fingerprint = compute_fingerprint(
@@ -421,7 +496,17 @@ def run(
                     if best_affinity is None or affinity < best_affinity:
                         best_affinity = affinity
 
+                    seed_successful_candidates.append(
+                        (
+                            affinity,
+                            smiles,
+                            source_id,
+                            len(new_bits),
+                            1 if verdict.is_hit else 0,
+                        )
+                    )
                     if not new_bits and not verdict.is_hit:
+                        seed_non_interesting += 1
                         continue
 
                     seed_entry = CorpusEntry(
@@ -440,12 +525,68 @@ def run(
                     )
                     corpus.add(seed_entry)
                     seed_interesting += 1
+                    interesting_smiles.add(smiles)
                 finally:
                     _cleanup_pose_path(result.pose_path)
 
+            if (
+                seed_interesting < SEED_FALLBACK_MIN_INTERESTING
+                and seed_successful_candidates
+                and stopped_reason == "completed"
+            ):
+                top_k = min(SEED_FALLBACK_TOP_K, len(seed_successful_candidates))
+                fallback_seen: set[str] = set()
+                for affinity, smiles, source_id, new_bits_count, finds_count in sorted(
+                    seed_successful_candidates,
+                    key=lambda item: item[0],
+                )[:top_k]:
+                    if smiles in interesting_smiles or smiles in fallback_seen:
+                        continue
+                    fallback_seen.add(smiles)
+                    fallback_entry = CorpusEntry(
+                        smiles=smiles,
+                        source_id=source_id,
+                        priority=0.1,
+                        best_affinity=affinity,
+                        new_bits=new_bits_count,
+                        finds=finds_count,
+                    )
+                    fallback_entry.priority = score_corpus_entry(
+                        fallback_entry,
+                        priority_new_bit_weight=priority_new_bit_weight,
+                        priority_affinity_weight=priority_affinity_weight,
+                        priority_reuse_penalty=priority_reuse_penalty,
+                    )
+                    corpus.add(fallback_entry)
+                    seed_fallback_added += 1
+                log(
+                    "[SEED][FALLBACK] interesting={} (<{}) so top-affinity fallback retained {} seeds "
+                    "(K={}) from successful docks"
+                    .format(
+                        seed_interesting,
+                        SEED_FALLBACK_MIN_INTERESTING,
+                        seed_fallback_added,
+                        top_k,
+                    )
+                )
+
             log(
-                "[SEED] completed seed docking: total={} interesting={} corpus={}"
-                .format(seed_total, seed_interesting, corpus.size())
+                "[SEED] completed seed docking: total={} attempted={} completed={} "
+                "interesting={} fallback_added={} prepare_failed={} prepare_relaxed={} "
+                "dock_failed={} parse_failed={} non_interesting={} corpus={}"
+                .format(
+                    seed_total,
+                    seed_attempted,
+                    seed_completed,
+                    seed_interesting,
+                    seed_fallback_added,
+                    seed_prepare_failed,
+                    seed_prepare_relaxed,
+                    seed_dock_failed,
+                    seed_parse_failed,
+                    seed_non_interesting,
+                    corpus.size(),
+                )
             )
         except KeyboardInterrupt:
             stopped_reason = "keyboard_interrupt"
@@ -544,6 +685,7 @@ def run(
                     (idx, pdbqt, target_config, exhaustiveness, num_modes, engine)
                     for idx, (_candidate, pdbqt) in enumerate(prepared)
                 ]
+                record_dock_attempts(len(prepared))
                 results_by_idx: list[DockingResult | None] = [None] * len(prepared)
                 iterator = pool.imap_unordered(_dock_worker, jobs)
                 pending = len(prepared)
@@ -568,7 +710,7 @@ def run(
                         raise KeyboardInterrupt from exc
                     results_by_idx[idx] = result
                     pending -= 1
-                    total_docks += 1
+                    record_dock_completion(result)
                     candidate = prepared[idx][0]
                     current_smiles = candidate.smiles
                     current_mutation_stage = candidate.stage
@@ -580,6 +722,7 @@ def run(
             else:
                 results = []
                 for candidate, pdbqt in prepared:
+                    record_dock_attempts()
                     result = dock(
                         pdbqt,
                         target_config,
@@ -588,7 +731,7 @@ def run(
                         engine=engine,
                     )
                     results.append(result)
-                    total_docks += 1
+                    record_dock_completion(result)
                     current_smiles = candidate.smiles
                     current_mutation_stage = candidate.stage
                     current_mutation_type = candidate.mutation_type
@@ -649,7 +792,7 @@ def run(
                         confirmed_pose_path = result.pose_path
 
                         if exhaustiveness_confirm is not None and exhaustiveness_confirm > 0:
-                            total_docks += 1
+                            record_dock_attempts()
                             current_stage = "confirm"
                             emit_progress()
                             confirm_result = dock(
@@ -659,6 +802,7 @@ def run(
                                 num_modes=num_modes,
                                 engine=engine,
                             )
+                            record_dock_completion(confirm_result)
                             try:
                                 if confirm_result.success and confirm_result.pose_path:
                                     confirm_pose_file = Path(confirm_result.pose_path)
@@ -802,7 +946,10 @@ def run(
         "coverage_ratio": cov_map.coverage_ratio(),
         "corpus_size": corpus.size(),
         "best_affinity": best_affinity if best_affinity is not None else 0.0,
-        "total_docks": total_docks,
+        # Kept for CLI/backward compatibility; mirrors attempted dock calls.
+        "total_docks": attempted_docks,
+        "attempted_docks": attempted_docks,
+        "completed_docks": completed_docks,
         "stopped_reason": stopped_reason,
     }
     if failure_reason is not None:

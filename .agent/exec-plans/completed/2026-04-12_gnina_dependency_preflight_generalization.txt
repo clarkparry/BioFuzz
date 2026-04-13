@@ -1,0 +1,19 @@
+Task: replace machine-specific GNINA workaround with generalized runtime dependency preflight
+
+Problem
+- A local machine-specific GNINA workaround (venv CUDA/cuDNN wheels + launcher wrapper) made this environment runnable but was not portable.
+
+Approach
+- Reverted local wrapper/environment workaround so repo-local `gnina` is a plain binary again.
+- Added generalized dependency preflight support:
+  - `biofuzz/docking/runner.py`
+    - `resolve_requested_binary(engine)` resolves the exact requested engine binary.
+    - `runtime_issues_for_binary(path)` probes startup and reports missing shared libraries and execution issues.
+  - `main.py`
+    - `_missing_runtime_dependencies()` now validates the exact requested engine (for `--engine gnina`, checks GNINA directly).
+    - Live runs fail early with explicit missing runtime dependency details.
+- Kept GNINA log parser compatibility improvements (portable correctness fix).
+
+Validation
+- Full test suite passes (`84 passed`).
+- Live preflight now fails with a clear message when GNINA runtime libs are missing, e.g. `libcudnn.so.9`.

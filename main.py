@@ -48,9 +48,22 @@ def _missing_runtime_dependencies(engine: str | None) -> list[str]:
         missing.append("RDKit")
     if not preparation.meeko_available():
         missing.append("Meeko")
-    if docking_runner._resolve_binary(engine) is None:
-        engine_label = engine or "gnina/vina/quickvina2/quickvina-w"
-        missing.append(f"docking binary ({engine_label})")
+    if engine:
+        requested_binary = docking_runner.resolve_requested_binary(engine)
+        if requested_binary is None:
+            missing.append(f"docking binary ({engine})")
+        else:
+            issues = docking_runner.runtime_issues_for_binary(requested_binary)
+            if issues:
+                missing.append(f"{Path(requested_binary).name} runtime ({'; '.join(issues)})")
+    else:
+        resolved_binary = docking_runner._resolve_binary(None)
+        if resolved_binary is None:
+            missing.append("docking binary (gnina/vina/quickvina2/quickvina-w)")
+        else:
+            issues = docking_runner.runtime_issues_for_binary(resolved_binary)
+            if issues:
+                missing.append(f"{Path(resolved_binary).name} runtime ({'; '.join(issues)})")
     return missing
 
 
@@ -85,12 +98,12 @@ def _engine_runtime_note(
 
     if requested_label and resolved_label and requested_label != resolved_label:
         if "gnina" in requested_label.lower() and "gnina" not in resolved_label.lower():
-            return f"gnina not installed; using {resolved_label} (CPU-only)."
+            return f"gnina unavailable or not runnable; using {resolved_label}."
         return f"Requested {requested_label}; using {resolved_label}."
 
     if requested_label and resolved_label is None:
         if "gnina" in requested_label.lower():
-            return "gnina not installed; no docking binary resolved."
+            return "gnina unavailable and no fallback docking binary resolved."
         return f"Requested {requested_label}; no docking binary resolved."
 
     if _is_gnina_binary(resolved_binary) and not gpu_enabled:

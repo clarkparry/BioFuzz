@@ -30,7 +30,19 @@ def _parse_cli_stats(stdout: str) -> dict[str, str]:
     stats: dict[str, str] = {}
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
-        if not line.startswith(("iterations:", "hits:", "coverage_ratio:", "corpus_size:", "best_affinity:", "total_docks:", "stopped_reason:")):
+        if not line.startswith(
+            (
+                "iterations:",
+                "hits:",
+                "coverage_ratio:",
+                "corpus_size:",
+                "best_affinity:",
+                "total_docks:",
+                "attempted_docks:",
+                "completed_docks:",
+                "stopped_reason:",
+            )
+        ):
             continue
         key, value = line.split(":", 1)
         stats[key.strip()] = value.strip()
@@ -69,10 +81,33 @@ def test_missing_runtime_dependencies_accepts_supported_binary_fallback(monkeypa
         return None
 
     monkeypatch.setattr(main_module.docking_runner.shutil, "which", fake_which)
+    monkeypatch.setattr(main_module.docking_runner, "runtime_issues_for_binary", lambda _binary: [])
 
     missing = main_module._missing_runtime_dependencies("gnina")
 
-    assert missing == []
+    assert missing == ["docking binary (gnina)"]
+
+
+def test_missing_runtime_dependencies_reports_gnina_runtime_library_issues(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.preparation, "Chem", object())
+    monkeypatch.setattr(main_module.preparation, "AllChem", object())
+    monkeypatch.setattr(main_module.preparation, "meeko_available", lambda: True)
+    monkeypatch.setattr(
+        main_module.docking_runner,
+        "resolve_requested_binary",
+        lambda _engine: "/usr/bin/gnina",
+    )
+    monkeypatch.setattr(
+        main_module.docking_runner,
+        "runtime_issues_for_binary",
+        lambda _binary: ["missing shared libraries: libcudnn.so.9, libcudart.so.12"],
+    )
+
+    missing = main_module._missing_runtime_dependencies("gnina")
+
+    assert missing == [
+        "gnina runtime (missing shared libraries: libcudnn.so.9, libcudart.so.12)"
+    ]
 
 
 def test_runtime_engine_details_reports_gnina_fallback_note(monkeypatch) -> None:
@@ -87,7 +122,7 @@ def test_runtime_engine_details_reports_gnina_fallback_note(monkeypatch) -> None
     assert Path(display_engine).name == "vina"
     assert gpu_enabled is False
     assert note is not None
-    assert "gnina not installed" in note
+    assert "gnina unavailable" in note
     assert "vina" in note
 
 
@@ -302,7 +337,7 @@ def test_main_passes_resolved_engine_to_tui_and_logs_runtime_notice(
     monkeypatch.setattr(
         main_module,
         "_runtime_engine_details",
-        lambda _engine: ("/usr/bin/vina", False, "gnina not installed; using vina (CPU-only)."),
+        lambda _engine: ("/usr/bin/vina", False, "gnina unavailable or not runnable; using vina."),
     )
     monkeypatch.setattr(main_module, "FuzzerTUI", FakeTUI)
     monkeypatch.setattr(
@@ -322,7 +357,7 @@ def test_main_passes_resolved_engine_to_tui_and_logs_runtime_notice(
     assert main_module.main() == 0
     assert Path(str(tui_init["engine"])).name == "vina"
     assert tui_init["gpu_enabled"] is False
-    assert tui_notices == ["gnina not installed; using vina (CPU-only)."]
+    assert tui_notices == ["gnina unavailable or not runnable; using vina."]
 
 
 def test_main_returns_interrupt_exit_code_when_run_stops_on_keyboard_interrupt(

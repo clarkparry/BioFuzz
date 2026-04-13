@@ -133,7 +133,68 @@ def test_run_loads_seeds_when_checkpoint_missing(
     assert (output_dir / "corpus.json").exists()
 
 
-def test_run_only_keeps_interesting_seed_inputs_in_initial_corpus(
+def test_run_reports_attempted_vs_completed_docks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(
+        fuzzer_module,
+        "load_smiles",
+        lambda _path: [("CCO", "seed_ok"), ("CCN", "seed_fail")],
+    )
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    def fake_dock(*args, **kwargs) -> DockingResult:
+        calls = fake_dock.calls
+        fake_dock.calls += 1
+        if calls == 0:
+            pose_path = output_dir / "seed_pose_1.pdbqt"
+            pose_path.write_text(
+                "MODEL 1\n"
+                "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+                "ENDMDL\n",
+                encoding="utf-8",
+            )
+            return DockingResult(
+                success=True,
+                log_text="   1       -8.0      0.000      0.000\n",
+                pose_path=str(pose_path),
+                error=None,
+                completed=True,
+            )
+        return DockingResult(
+            success=False,
+            log_text="error while loading shared libraries: libcudnn.so.9",
+            pose_path=None,
+            error="Docking failed with return code 127",
+            completed=False,
+        )
+
+    fake_dock.calls = 0
+    monkeypatch.setattr(fuzzer_module, "dock", fake_dock)
+    messages: list[str] = []
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=1,
+        logger=messages.append,
+    )
+
+    assert stats["total_docks"] == 2
+    assert stats["attempted_docks"] == 2
+    assert stats["completed_docks"] == 1
+
+
+def test_run_uses_seed_fallback_when_interesting_pool_is_too_small(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -174,6 +235,7 @@ def test_run_only_keeps_interesting_seed_inputs_in_initial_corpus(
         )
 
     monkeypatch.setattr(fuzzer_module, "dock", fake_dock)
+    messages: list[str] = []
 
     stats = run(
         target_config=_target_config(receptor),
@@ -181,15 +243,61 @@ def test_run_only_keeps_interesting_seed_inputs_in_initial_corpus(
         output_dir=output_dir,
         max_iterations=0,
         workers=1,
+        logger=messages.append,
     )
 
     corpus = Corpus()
     corpus.load(_corpus_checkpoint(output_dir))
 
     assert stats["total_docks"] == 2
+    assert stats["corpus_size"] == 2
+    assert corpus.size() == 2
+    assert {corpus.pop().source_id, corpus.pop().source_id} == {
+        "seed_interesting",
+        "seed_boring",
+    }
+    assert any(message.startswith("[SEED][FALLBACK]") for message in messages)
+
+
+def test_run_retries_seed_preparation_without_druglike_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+
+    prepare_calls: list[bool] = []
+
+    def fake_prepare(_smiles: str, **kwargs) -> str | None:
+        require_drug_like = kwargs.get("require_drug_like", True)
+        prepare_calls.append(require_drug_like)
+        return None if require_drug_like else "PDBQT"
+
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", fake_prepare)
+    monkeypatch.setattr(
+        fuzzer_module,
+        "dock",
+        _make_successful_dock(output_dir, affinity=-7.0, x=10.0, y=0.0, z=0.0),
+    )
+    messages: list[str] = []
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=1,
+        logger=messages.append,
+    )
+
+    assert stats["total_docks"] == 1
     assert stats["corpus_size"] == 1
-    assert corpus.size() == 1
-    assert corpus.pop().source_id == "seed_interesting"
+    assert prepare_calls == [True, False]
+    assert any("prepare_relaxed=1" in message for message in messages)
 
 
 def test_run_handles_keyboard_interrupt_during_seed_docking(
@@ -227,7 +335,7 @@ def test_run_handles_keyboard_interrupt_during_seed_docking(
     )
 
     assert stats["stopped_reason"] == "keyboard_interrupt"
-    assert stats["total_docks"] == 0
+    assert stats["total_docks"] == 1
     assert len(dock_calls) == 1
     assert (output_dir / "coverage.json").exists()
     assert _corpus_checkpoint(output_dir).exists()
@@ -265,8 +373,9 @@ def test_run_skips_mismatched_coverage_checkpoint(
     )
 
     assert stats["coverage_ratio"] == 0.0
-    assert stats["corpus_size"] == 0
+    assert stats["corpus_size"] == 1
     assert any("skipping coverage checkpoint" in message.lower() for message in messages)
+    assert any(message.startswith("[SEED][FALLBACK]") for message in messages)
 
 
 def test_run_reapplies_configured_corpus_max_size_after_resume(tmp_path: Path) -> None:

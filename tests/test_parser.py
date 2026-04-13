@@ -16,6 +16,25 @@ Random header
     assert modes[2].rmsd_ub == 3.2
 
 
+def test_parse_log_extracts_gnina_modes() -> None:
+    log = """
+gnina banner
+mode |  affinity  |  intramol  |    CNN     |   CNN
+     | (kcal/mol) | (kcal/mol) | pose score | affinity
+-----+------------+------------+------------+----------
+    1       -8.77       -0.42       0.8711      5.679
+    2       -8.15       -0.54       0.8680      5.498
+    3       -7.58       -0.44       0.7748      6.077
+"""
+    modes = parse_log(log)
+    assert len(modes) == 3
+    assert modes[0].mode == 1
+    assert modes[0].affinity == -8.77
+    # For gnina format these map to intramol / CNN pose score columns.
+    assert modes[0].rmsd_lb == -0.42
+    assert modes[0].rmsd_ub == 0.8711
+
+
 def test_parse_pose_reads_first_model_only() -> None:
     pdbqt = """
 MODEL 1

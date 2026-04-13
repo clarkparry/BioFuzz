@@ -19,6 +19,7 @@ def test_resolve_binary_falls_back_from_requested_engine(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(runner.shutil, "which", fake_which)
+    monkeypatch.setattr(runner, "REPO_TOOL_BIN_DIR", Path("/definitely/missing/biofuzz-tool-bin"))
     resolved = runner._resolve_binary("gnina")
 
     assert resolved == "/usr/bin/vina"
@@ -44,6 +45,46 @@ def test_resolve_binary_checks_repo_local_tool_dir(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(runner, "REPO_TOOL_BIN_DIR", tmp_path)
 
     assert runner._resolve_binary("gnina") == str(local_vina)
+
+
+def test_runtime_issues_for_binary_reports_missing_shared_libraries(monkeypatch) -> None:
+    class Result:
+        returncode = 127
+        stdout = ""
+        stderr = "error while loading shared libraries: libcudnn.so.9: cannot open shared object file"
+
+    monkeypatch.setattr(runner.subprocess, "run", lambda *args, **kwargs: Result())
+    issues = runner.runtime_issues_for_binary("/usr/bin/gnina")
+    assert issues == ["missing shared libraries: libcudnn.so.9"]
+
+
+def test_runtime_issues_for_binary_collects_ldd_missing_libraries(monkeypatch) -> None:
+    class HelpResult:
+        returncode = 127
+        stdout = ""
+        stderr = ""
+
+    class LddResult:
+        returncode = 0
+        stdout = "libcudnn.so.9 => not found\nlibcudart.so.12 => not found\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ldd":
+            return LddResult()
+        return HelpResult()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    issues = runner.runtime_issues_for_binary("/usr/bin/gnina")
+    assert issues == ["missing shared libraries: libcudart.so.12, libcudnn.so.9"]
+
+
+def test_resolve_requested_binary_uses_exact_engine(monkeypatch) -> None:
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/bin/vina" if name == "vina" else None)
+    monkeypatch.setattr(runner, "REPO_TOOL_BIN_DIR", Path("/definitely/missing/biofuzz-tool-bin"))
+
+    assert runner.resolve_requested_binary("vina") == "/usr/bin/vina"
+    assert runner.resolve_requested_binary("gnina") is None
 
 
 def test_dock_supports_receptor_path_keyword(monkeypatch, tmp_path: Path) -> None:
@@ -75,6 +116,7 @@ def test_dock_supports_receptor_path_keyword(monkeypatch, tmp_path: Path) -> Non
 
     assert result.success
     assert result.pose_path is not None
+    assert result.completed is True
 
 
 def test_dock_raises_keyboard_interrupt_when_process_exits_via_sigint(

@@ -6,12 +6,18 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import re
 
 from biofuzz.docking.config import BoxConfig, TargetConfig
 
 
 DEFAULT_BINARIES = ("gnina", "vina", "quickvina2", "quickvina-w")
 REPO_TOOL_BIN_DIR = Path(__file__).resolve().parents[2] / ".agent" / "tools" / "bin"
+_MISSING_SHARED_LIB_RE = re.compile(
+    r"error while loading shared libraries:\s*(?P<lib>[^:\s]+)",
+    re.IGNORECASE,
+)
+_LDD_MISSING_RE = re.compile(r"^\s*(?P<lib>\S+)\s*=>\s*not found\s*$", re.IGNORECASE)
 
 
 @dataclass
@@ -20,6 +26,7 @@ class DockingResult:
     log_text: str
     pose_path: str | None
     error: str | None
+    completed: bool | None = None
 
 
 def _resolve_candidate_binary(candidate: str) -> str | None:
@@ -32,6 +39,64 @@ def _resolve_candidate_binary(candidate: str) -> str | None:
         return str(repo_binary)
 
     return None
+
+
+def resolve_requested_binary(engine: str | None) -> str | None:
+    if not engine:
+        return None
+    return _resolve_candidate_binary(engine)
+
+
+def _missing_shared_libraries_from_ldd(binary_path: str, timeout_seconds: int = 5) -> list[str]:
+    try:
+        probe = subprocess.run(
+            ["ldd", binary_path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError):
+        return []
+
+    output = f"{probe.stdout or ''}\n{probe.stderr or ''}"
+    return sorted(
+        {
+            match.group("lib")
+            for line in output.splitlines()
+            for match in [_LDD_MISSING_RE.match(line)]
+            if match is not None
+        }
+    )
+
+
+def runtime_issues_for_binary(binary_path: str, timeout_seconds: int = 5) -> list[str]:
+    try:
+        probe = subprocess.run(
+            [binary_path, "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        # Process launched and stayed alive long enough to timeout; runtime dependencies are present.
+        return []
+    except (FileNotFoundError, PermissionError, OSError):
+        return ["binary failed to execute"]
+
+    combined_output = f"{probe.stdout or ''}\n{probe.stderr or ''}"
+    missing_libs = sorted({match.group("lib") for match in _MISSING_SHARED_LIB_RE.finditer(combined_output)})
+    missing_libs = sorted(set(missing_libs + _missing_shared_libraries_from_ldd(binary_path)))
+    if missing_libs:
+        return [f"missing shared libraries: {', '.join(missing_libs)}"]
+
+    if probe.returncode == 126:
+        return ["binary is not executable (permission denied)"]
+    if probe.returncode == 127:
+        return ["binary failed to start (missing runtime dependencies)"]
+
+    return []
 
 
 def _resolve_binary(engine: str | None) -> str | None:
@@ -79,6 +144,7 @@ def dock(
             log_text="",
             pose_path=None,
             error=f"Receptor not found: {receptor}",
+            completed=False,
         )
 
     binary = _resolve_binary(engine)
@@ -88,6 +154,7 @@ def dock(
             log_text="",
             pose_path=None,
             error="No docking binary found. Install gnina/vina or set --engine.",
+            completed=False,
         )
 
     ligand_tmp = tempfile.NamedTemporaryFile(
@@ -159,6 +226,7 @@ def dock(
             log_text=exc.stdout or "",
             pose_path=None,
             error=f"Docking timed out after {timeout_seconds}s",
+            completed=False,
         )
     except Exception as exc:
         ligand_path.unlink(missing_ok=True)
@@ -168,6 +236,7 @@ def dock(
             log_text="",
             pose_path=None,
             error=f"Docking execution failed: {exc}",
+            completed=False,
         )
     finally:
         ligand_path.unlink(missing_ok=True)
@@ -188,6 +257,7 @@ def dock(
             log_text=log_text,
             pose_path=None,
             error=f"Docking failed with return code {proc.returncode}",
+            completed=(proc.returncode == 0),
         )
 
     return DockingResult(
@@ -195,4 +265,5 @@ def dock(
         log_text=log_text,
         pose_path=str(pose_path),
         error=None,
+        completed=True,
     )

@@ -22,9 +22,10 @@ class PoseAtom:
     type: str
 
 
+_FLOAT_RE = r"-?\d+(?:\.\d+)?"
 _LOG_MODE_RE = re.compile(
-    r"^\s*(?P<mode>\d+)\s+(?P<affinity>-?\d+(?:\.\d+)?)\s+"
-    r"(?P<rmsd_lb>\d+(?:\.\d+)?)\s+(?P<rmsd_ub>\d+(?:\.\d+)?)\s*$"
+    r"^\s*(?P<mode>\d+)\s+(?P<affinity>{f})\s+"
+    r"(?P<col3>{f})\s+(?P<col4>{f})(?:\s+(?P<col5>{f}))?\s*$".format(f=_FLOAT_RE)
 )
 
 
@@ -38,8 +39,8 @@ def parse_log(log_text: str) -> list[DockingMode]:
             DockingMode(
                 mode=int(match.group("mode")),
                 affinity=float(match.group("affinity")),
-                rmsd_lb=float(match.group("rmsd_lb")),
-                rmsd_ub=float(match.group("rmsd_ub")),
+                rmsd_lb=float(match.group("col3")),
+                rmsd_ub=float(match.group("col4")),
             )
         )
 

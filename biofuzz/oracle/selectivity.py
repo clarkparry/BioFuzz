@@ -5,7 +5,7 @@ from typing import Callable
 
 from biofuzz.docking.config import TargetConfig
 from biofuzz.docking.parser import parse_log
-from biofuzz.docking.runner import dock
+from biofuzz.docking.runner import DockingResult, dock
 from biofuzz.molecules.preparation import prepare_smiles
 
 
@@ -16,14 +16,12 @@ def _best_affinity(
     exhaustiveness: int = 8,
     num_modes: int = 3,
     engine: str = "gnina",
-    dock_observer: Callable[[], None] | None = None,
+    dock_observer: Callable[[DockingResult], None] | None = None,
 ) -> float | None:
     prepared_ligand = ligand_pdbqt or prepare_smiles(smiles)
     if prepared_ligand is None:
         return None
 
-    if dock_observer is not None:
-        dock_observer()
     result = dock(
         prepared_ligand,
         target_config,
@@ -31,6 +29,8 @@ def _best_affinity(
         num_modes=num_modes,
         engine=engine,
     )
+    if dock_observer is not None:
+        dock_observer(result)
     if not result.success:
         return None
     try:
@@ -77,7 +77,7 @@ def _selectivity_ratio(
     exhaustiveness: int = 8,
     num_modes: int = 3,
     engine: str = "gnina",
-    dock_observer: Callable[[], None] | None = None,
+    dock_observer: Callable[[DockingResult], None] | None = None,
 ) -> float | None:
     target_score = target_affinity
     if target_score is None:
@@ -117,7 +117,7 @@ def selectivity_ratio_from_target(
     exhaustiveness: int = 8,
     num_modes: int = 3,
     engine: str = "gnina",
-    dock_observer: Callable[[], None] | None = None,
+    dock_observer: Callable[[DockingResult], None] | None = None,
 ) -> float | None:
     offtarget = _offtarget_config(target_config)
     if offtarget is None:
