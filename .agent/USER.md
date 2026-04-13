@@ -1,3 +1,25 @@
+## 2026-04-12 - Ctrl-C broken-pipe hardening for pool submission path
+
+- Hardened manual-abort behavior when multiprocessing pipes break during job submission (`pool.imap_unordered(...)`), not just during iterator result collection.
+- Added a shared guard in `biofuzz/core/fuzzer.py` that maps `BrokenPipeError`, `EOFError`, and `OSError(EPIPE)` to `KeyboardInterrupt` with the existing manual-abort warning log path.
+- Applied this to both seed-stage batch docking and mutation-stage docking submission/collection loops so abort semantics are consistent in CPU and GPU campaigns.
+- Added regression tests for:
+  - seed-stage pipe break during pool submission
+  - mutation-stage pipe break during pool submission
+
+## 2026-04-12 - Runtime GPU activity signal + parallel seed docking
+
+- Updated GPU status in the TUI to report runtime activity instead of static availability:
+  - `active` when a completed GNINA dock did not emit CPU-fallback warnings.
+  - `inactive` when GNINA reports `WARNING: No GPU detected...` (or when non-GNINA engines are used).
+  - `probing` only before the first conclusive dock result when GPU-capable runtime is expected.
+- This uses docking logs already captured by `DockingResult` and sets state once during normal completion accounting, so no extra probe commands are added to the hot path.
+- Parallelized seed-stage docking across worker pool batches (same pool strategy used in mutation-stage docking), so `workers` now affects seed throughput as well.
+- Added regression tests for:
+  - GNINA GPU active/inactive inference in `tests/test_runner.py`.
+  - TUI GPU status rendering states in `tests/test_tui.py`.
+  - Seed-stage parallelization path in `tests/test_fuzzer.py`.
+
 ## 2026-04-12 - GNINA local installer and runtime engine transparency in TUI
 
 - Added `.agent/tools/install_gnina.py` so GNINA can be installed into `.agent/tools/bin/gnina` with a one-command workflow analogous to the existing Vina installer.

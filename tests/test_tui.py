@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from io import StringIO
+import re
 
 import pytest
 
 from biofuzz.core.tui import FuzzerTUI, RuntimeStatus
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 class FakeTTY(StringIO):
@@ -118,3 +122,54 @@ def test_tui_colors_completed_docks_when_stalled(staleness: float, expected_code
 
     rendered = stream.getvalue()
     assert expected_code in rendered
+
+
+@pytest.mark.parametrize(
+    ("gpu_active", "expected_label"),
+    [
+        (True, "GPU: active"),
+        (False, "GPU: inactive"),
+        (None, "GPU: probing"),
+    ],
+)
+def test_tui_reports_runtime_gpu_activity(
+    gpu_active: bool | None,
+    expected_label: str,
+) -> None:
+    stream = FakeTTY()
+    tui = FuzzerTUI(
+        target="egfr",
+        engine="gnina",
+        workers=2,
+        gpu_enabled=True,
+        stream=stream,
+        refresh_seconds=0.0,
+        enabled=True,
+    )
+
+    tui.update(
+        RuntimeStatus(
+            stage="dock",
+            mutation_stage="havoc",
+            mutation_type="add_substituent",
+            current_parent="CCO",
+            current_smiles="CCN",
+            power_score=12.5,
+            mutation_budget=40,
+            total_docks=8,
+            completed_docks=8,
+            docks_per_sec=1.0,
+            completed_dock_staleness_seconds=0.0,
+            corpus_size=2,
+            finds=0,
+            coverage_ratio=0.1,
+            best_affinity=-8.0,
+            checkpoints=0,
+            elapsed_seconds=5.0,
+            gpu_active=gpu_active,
+        )
+    )
+    tui.close()
+
+    rendered = ANSI_RE.sub("", stream.getvalue())
+    assert expected_label in rendered

@@ -27,6 +27,7 @@ class DockingResult:
     pose_path: str | None
     error: str | None
     completed: bool | None = None
+    gpu_active: bool | None = None
 
 
 def _resolve_candidate_binary(candidate: str) -> str | None:
@@ -126,6 +127,33 @@ def _resolve_target(
     return receptor_path, box
 
 
+def _is_gnina_binary(binary: str) -> bool:
+    return "gnina" in Path(binary).name.lower()
+
+
+def _infer_gpu_active(
+    *,
+    binary: str,
+    log_text: str,
+    completed: bool,
+) -> bool | None:
+    if not _is_gnina_binary(binary):
+        return False
+
+    lowered = log_text.lower()
+    if "warning: no gpu detected" in lowered:
+        return False
+    if "--no_gpu" in lowered:
+        return False
+    if "cnn scoring will be slow" in lowered:
+        return False
+
+    if completed:
+        return True
+
+    return None
+
+
 def dock(
     ligand_pdbqt: str,
     receptor_path: TargetConfig | str,
@@ -145,6 +173,7 @@ def dock(
             pose_path=None,
             error=f"Receptor not found: {receptor}",
             completed=False,
+            gpu_active=None,
         )
 
     binary = _resolve_binary(engine)
@@ -155,6 +184,7 @@ def dock(
             pose_path=None,
             error="No docking binary found. Install gnina/vina or set --engine.",
             completed=False,
+            gpu_active=None,
         )
 
     ligand_tmp = tempfile.NamedTemporaryFile(
@@ -227,6 +257,7 @@ def dock(
             pose_path=None,
             error=f"Docking timed out after {timeout_seconds}s",
             completed=False,
+            gpu_active=None,
         )
     except Exception as exc:
         ligand_path.unlink(missing_ok=True)
@@ -237,6 +268,7 @@ def dock(
             pose_path=None,
             error=f"Docking execution failed: {exc}",
             completed=False,
+            gpu_active=None,
         )
     finally:
         ligand_path.unlink(missing_ok=True)
@@ -252,12 +284,14 @@ def dock(
     success = proc.returncode == 0 and pose_path.exists() and pose_path.stat().st_size > 0
     if not success:
         pose_path.unlink(missing_ok=True)
+        completed = proc.returncode == 0
         return DockingResult(
             success=False,
             log_text=log_text,
             pose_path=None,
             error=f"Docking failed with return code {proc.returncode}",
-            completed=(proc.returncode == 0),
+            completed=completed,
+            gpu_active=_infer_gpu_active(binary=binary, log_text=log_text, completed=completed),
         )
 
     return DockingResult(
@@ -266,4 +300,5 @@ def dock(
         pose_path=str(pose_path),
         error=None,
         completed=True,
+        gpu_active=_infer_gpu_active(binary=binary, log_text=log_text, completed=True),
     )

@@ -133,6 +133,96 @@ def test_run_loads_seeds_when_checkpoint_missing(
     assert (output_dir / "corpus.json").exists()
 
 
+def test_run_parallelizes_seed_docking_when_workers_gt_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(
+        fuzzer_module,
+        "load_smiles",
+        lambda _path: [("CCO", "seed_1"), ("CCN", "seed_2")],
+    )
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    class FakeIterator:
+        def __init__(self, results: list[tuple[int, DockingResult]]) -> None:
+            self._results = results
+
+        def next(self, timeout=None):  # noqa: ANN001 - matches multiprocessing iterator
+            if not self._results:
+                raise AssertionError("next() called with no pending seed results")
+            return self._results.pop(0)
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.imap_calls = 0
+            self.job_counts: list[int] = []
+            self.closed = False
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, jobs):
+            job_list = list(jobs)
+            self.imap_calls += 1
+            self.job_counts.append(len(job_list))
+            results: list[tuple[int, DockingResult]] = []
+            for idx, _pdbqt, _target_cfg, _exhaustiveness, _num_modes, _engine in job_list:
+                pose_path = output_dir / f"seed_pool_pose_{idx}.pdbqt"
+                pose_path.write_text(
+                    "MODEL 1\n"
+                    "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+                    "ENDMDL\n",
+                    encoding="utf-8",
+                )
+                results.append(
+                    (
+                        idx,
+                        DockingResult(
+                            success=True,
+                            log_text="   1       -8.0      0.000      0.000\n",
+                            pose_path=str(pose_path),
+                            error=None,
+                            completed=True,
+                        ),
+                    )
+                )
+            return FakeIterator(results)
+
+        def close(self) -> None:
+            self.closed = True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=2,
+    )
+
+    assert fake_pool.imap_calls == 1
+    assert fake_pool.job_counts == [2]
+    assert fake_pool.closed is True
+    assert fake_pool.terminated is False
+    assert fake_pool.joined is True
+    assert stats["attempted_docks"] == 2
+    assert stats["completed_docks"] == 2
+
+
 def test_run_reports_attempted_vs_completed_docks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -834,6 +924,58 @@ def test_run_handles_keyboard_interrupt_while_waiting_for_pool_results(
     assert fake_pool.joined is True
 
 
+def test_run_treats_pool_broken_pipe_during_seed_submission_as_manual_abort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, _jobs):
+            raise BrokenPipeError("simulated broken pipe during seed submission")
+
+        def close(self) -> None:
+            return
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    messages: list[str] = []
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=2,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert fake_pool.terminated is True
+    assert fake_pool.joined is True
+    assert any("pool result channel closed during docking collection" in message for message in messages)
+
+
 def test_run_keeps_manual_abort_reason_when_pool_shutdown_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -882,6 +1024,92 @@ def test_run_keeps_manual_abort_reason_when_pool_shutdown_raises(
     assert "failure_reason" not in stats
     assert any("worker pool shutdown step failed" in message for message in messages)
     assert any("worker pool join failed" in message for message in messages)
+
+
+def test_run_treats_pool_broken_pipe_during_mutation_submission_as_manual_abort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, _jobs):
+            self.calls += 1
+            if self.calls == 1:
+                # Seed submission: return one completed seed result.
+                class SeedIterator:
+                    def __init__(self) -> None:
+                        self._sent = False
+
+                    def next(self, timeout=None):  # noqa: ANN001 - multiprocessing compatibility
+                        if self._sent:
+                            raise AssertionError("seed iterator consumed too many times")
+                        self._sent = True
+                        pose_path = output_dir / "seed_pose.pdbqt"
+                        pose_path.write_text(
+                            "MODEL 1\n"
+                            "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+                            "ENDMDL\n",
+                            encoding="utf-8",
+                        )
+                        return (
+                            0,
+                            DockingResult(
+                                success=True,
+                                log_text="   1       -8.0      0.000      0.000\n",
+                                pose_path=str(pose_path),
+                                error=None,
+                                completed=True,
+                            ),
+                        )
+
+                return SeedIterator()
+            raise BrokenPipeError("simulated broken pipe during mutation submission")
+
+        def close(self) -> None:
+            return
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    messages: list[str] = []
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=2,
+        mutations_per_entry=1,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert fake_pool.terminated is True
+    assert fake_pool.joined is True
+    assert any("pool result channel closed during docking collection" in message for message in messages)
 
 
 def test_run_treats_pool_broken_pipe_during_result_collection_as_manual_abort(

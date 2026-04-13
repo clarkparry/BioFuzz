@@ -117,6 +117,75 @@ def test_dock_supports_receptor_path_keyword(monkeypatch, tmp_path: Path) -> Non
     assert result.success
     assert result.pose_path is not None
     assert result.completed is True
+    assert result.gpu_active is False
+
+
+def test_dock_marks_gpu_inactive_when_gnina_reports_no_gpu(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    receptor = tmp_path / "receptor.pdbqt"
+    receptor.write_text("RECEPTOR", encoding="utf-8")
+    box = BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0)
+
+    monkeypatch.setattr(runner, "_resolve_binary", lambda engine: "/usr/bin/gnina")
+
+    class Result:
+        returncode = 0
+        stdout = "WARNING: No GPU detected. CNN scoring will be slow.\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        out_idx = cmd.index("--out") + 1
+        Path(cmd[out_idx]).write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+        return Result()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    result = runner.dock(
+        ligand_pdbqt="ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00   0.00 C\n",
+        receptor_path=str(receptor),
+        box=box,
+        engine="gnina",
+    )
+
+    assert result.success is True
+    assert result.completed is True
+    assert result.gpu_active is False
+
+
+def test_dock_marks_gpu_active_when_gnina_succeeds_without_no_gpu_warning(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    receptor = tmp_path / "receptor.pdbqt"
+    receptor.write_text("RECEPTOR", encoding="utf-8")
+    box = BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0)
+
+    monkeypatch.setattr(runner, "_resolve_binary", lambda engine: "/usr/bin/gnina")
+
+    class Result:
+        returncode = 0
+        stdout = "Using random seed: 1234\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        out_idx = cmd.index("--out") + 1
+        Path(cmd[out_idx]).write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+        return Result()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    result = runner.dock(
+        ligand_pdbqt="ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00   0.00 C\n",
+        receptor_path=str(receptor),
+        box=box,
+        engine="gnina",
+    )
+
+    assert result.success is True
+    assert result.completed is True
+    assert result.gpu_active is True
 
 
 def test_dock_raises_keyboard_interrupt_when_process_exits_via_sigint(

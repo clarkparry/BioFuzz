@@ -36,6 +36,7 @@ class RuntimeStatus:
     best_affinity: float | None
     checkpoints: int
     elapsed_seconds: float
+    gpu_active: bool | None = None
 
 
 class FuzzerTUI:
@@ -234,7 +235,7 @@ class FuzzerTUI:
                 f"{field('Runtime', fmt_duration(status.elapsed_seconds))}  "
                 f"{field('Since Last Find', fmt_duration(since_last_find_seconds))}",
                 f"{field('Engine', Path(self.engine).name)}  "
-                f"{field('GPU', 'enabled' if self.gpu_enabled else 'disabled')}  "
+                f"{field('GPU', self._gpu_status_label(status.gpu_active))}  "
                 f"{field('Workers', str(self.workers))}",
             ],
             divider,
@@ -289,3 +290,12 @@ class FuzzerTUI:
         lines.append(divider)
 
         return lines
+
+    def _gpu_status_label(self, gpu_active: bool | None) -> str:
+        if gpu_active is True:
+            return "active"
+        if gpu_active is False:
+            return "inactive"
+        if self.gpu_enabled:
+            return "probing"
+        return "disabled"

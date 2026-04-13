@@ -267,6 +267,7 @@ def run(
     completed_docks = 0
     first_attempt_elapsed_seconds: float | None = None
     last_completed_dock_elapsed_seconds: float | None = None
+    runtime_gpu_active: bool | None = None
 
     def record_dock_attempts(count: int = 1) -> None:
         nonlocal attempted_docks, first_attempt_elapsed_seconds
@@ -277,7 +278,11 @@ def run(
             first_attempt_elapsed_seconds = elapsed_seconds()
 
     def record_dock_completion(result: DockingResult) -> None:
-        nonlocal completed_docks, last_completed_dock_elapsed_seconds
+        nonlocal completed_docks, last_completed_dock_elapsed_seconds, runtime_gpu_active
+        if result.gpu_active is True:
+            runtime_gpu_active = True
+        elif result.gpu_active is False and runtime_gpu_active is None:
+            runtime_gpu_active = False
         if _dock_completed(result):
             completed_docks += 1
             last_completed_dock_elapsed_seconds = elapsed_seconds()
@@ -317,6 +322,7 @@ def run(
                 best_affinity=best_affinity,
                 checkpoints=checkpoint_count,
                 elapsed_seconds=elapsed,
+                gpu_active=runtime_gpu_active,
             )
         )
 
@@ -324,6 +330,20 @@ def run(
         record_dock_attempts()
         record_dock_completion(result)
         emit_progress()
+
+    def raise_manual_abort_on_pool_pipe_error(exc: BaseException) -> None:
+        if isinstance(exc, (BrokenPipeError, EOFError)):
+            log(
+                "[WARN] pool result channel closed during docking collection; "
+                "treating as manual abort"
+            )
+            raise KeyboardInterrupt from exc
+        if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EPIPE:
+            log(
+                "[WARN] pool result channel closed during docking collection; "
+                "treating as manual abort"
+            )
+            raise KeyboardInterrupt from exc
 
     corpus = Corpus(max_size=max_corpus_size)
     cov_map = CoverageMap(target_config.pocket.residue_ids)
@@ -404,6 +424,157 @@ def run(
             seed_completed = 0
             seed_successful_candidates: list[tuple[float, str, str, int, int]] = []
             interesting_smiles: set[str] = set()
+            seed_pending: list[tuple[str, str, str]] = []
+            seed_dock_batch_size = max(1, workers * 2)
+
+            def process_seed_result(smiles: str, source_id: str, result: DockingResult) -> None:
+                nonlocal seed_completed
+                nonlocal seed_dock_failed
+                nonlocal seed_parse_failed
+                nonlocal seed_non_interesting
+                nonlocal seed_interesting
+                nonlocal best_affinity
+                nonlocal current_stage
+
+                record_dock_completion(result)
+                if _dock_completed(result):
+                    seed_completed += 1
+                emit_progress("seed_dock")
+
+                if not result.success or not result.pose_path:
+                    seed_dock_failed += 1
+                    _cleanup_pose_path(result.pose_path)
+                    return
+
+                pose_file = Path(result.pose_path)
+                if not pose_file.exists():
+                    seed_dock_failed += 1
+                    _cleanup_pose_path(result.pose_path)
+                    return
+
+                try:
+                    pose_text = pose_file.read_text(encoding="utf-8")
+                    modes = parse_log(result.log_text)
+                    atoms = parse_pose(pose_text)
+                    if not modes or not atoms:
+                        seed_parse_failed += 1
+                        return
+
+                    fingerprint = compute_fingerprint(
+                        atoms,
+                        protein_residues,
+                        target_config.pocket,
+                    )
+                    new_bits = cov_map.update(fingerprint)
+                    affinity = modes[0].affinity
+
+                    current_stage = "seed_oracle"
+                    emit_progress()
+                    verdict = evaluate(modes, pose_text, target_config.oracle)
+
+                    if best_affinity is None or affinity < best_affinity:
+                        best_affinity = affinity
+
+                    seed_successful_candidates.append(
+                        (
+                            affinity,
+                            smiles,
+                            source_id,
+                            len(new_bits),
+                            1 if verdict.is_hit else 0,
+                        )
+                    )
+                    if not new_bits and not verdict.is_hit:
+                        seed_non_interesting += 1
+                        return
+
+                    seed_entry = CorpusEntry(
+                        smiles=smiles,
+                        source_id=source_id,
+                        priority=0.1,
+                        best_affinity=affinity,
+                        new_bits=len(new_bits),
+                        finds=1 if verdict.is_hit else 0,
+                    )
+                    seed_entry.priority = score_corpus_entry(
+                        seed_entry,
+                        priority_new_bit_weight=priority_new_bit_weight,
+                        priority_affinity_weight=priority_affinity_weight,
+                        priority_reuse_penalty=priority_reuse_penalty,
+                    )
+                    corpus.add(seed_entry)
+                    seed_interesting += 1
+                    interesting_smiles.add(smiles)
+                finally:
+                    _cleanup_pose_path(result.pose_path)
+
+            def flush_seed_batch() -> None:
+                nonlocal seed_attempted
+                nonlocal current_stage
+                nonlocal current_parent
+                nonlocal current_smiles
+                nonlocal current_mutation_stage
+                nonlocal current_mutation_type
+
+                if not seed_pending:
+                    return
+
+                batch = seed_pending.copy()
+                seed_pending.clear()
+
+                current_stage = "seed_dock"
+                emit_progress()
+
+                if pool is not None:
+                    jobs = [
+                        (idx, pdbqt, target_config, exhaustiveness, num_modes, engine)
+                        for idx, (_smiles, _source_id, pdbqt) in enumerate(batch)
+                    ]
+                    record_dock_attempts(len(jobs))
+                    seed_attempted += len(jobs)
+                    results_by_idx: list[DockingResult | None] = [None] * len(batch)
+                    try:
+                        iterator = pool.imap_unordered(_dock_worker, jobs)
+                    except Exception as exc:
+                        raise_manual_abort_on_pool_pipe_error(exc)
+                        raise
+                    pending = len(batch)
+                    while pending > 0:
+                        try:
+                            idx, result = iterator.next(timeout=0.2)
+                        except PoolTimeoutError:
+                            continue
+                        except Exception as exc:
+                            raise_manual_abort_on_pool_pipe_error(exc)
+                            raise
+                        results_by_idx[idx] = result
+                        pending -= 1
+                        smiles, source_id, _pdbqt = batch[idx]
+                        current_parent = source_id
+                        current_smiles = smiles
+                        current_mutation_stage = "seed"
+                        current_mutation_type = "seed"
+                        process_seed_result(smiles, source_id, result)
+                    if any(result is None for result in results_by_idx):
+                        raise RuntimeError("worker pool returned incomplete seed docking results")
+                    return
+
+                for smiles, source_id, pdbqt in batch:
+                    current_parent = source_id
+                    current_smiles = smiles
+                    current_mutation_stage = "seed"
+                    current_mutation_type = "seed"
+                    record_dock_attempts()
+                    seed_attempted += 1
+                    result = dock(
+                        pdbqt,
+                        target_config,
+                        exhaustiveness=exhaustiveness,
+                        num_modes=num_modes,
+                        engine=engine,
+                    )
+                    process_seed_result(smiles, source_id, result)
+
             log("[SEED] docking seeds to build initial corpus")
             for smiles, source_id in load_smiles(seed_smiles_path):
                 seed_total += 1
@@ -446,88 +617,11 @@ def run(
                     cache.set(smiles, pdbqt)
                     cached = pdbqt
 
-                current_stage = "seed_dock"
-                emit_progress()
-                record_dock_attempts()
-                seed_attempted += 1
-                result = dock(
-                    cached,
-                    target_config,
-                    exhaustiveness=exhaustiveness,
-                    num_modes=num_modes,
-                    engine=engine,
-                )
-                record_dock_completion(result)
-                if _dock_completed(result):
-                    seed_completed += 1
-                emit_progress("seed_dock")
+                seed_pending.append((smiles, source_id, cached))
+                if len(seed_pending) >= seed_dock_batch_size:
+                    flush_seed_batch()
 
-                if not result.success or not result.pose_path:
-                    seed_dock_failed += 1
-                    _cleanup_pose_path(result.pose_path)
-                    continue
-
-                pose_file = Path(result.pose_path)
-                if not pose_file.exists():
-                    seed_dock_failed += 1
-                    _cleanup_pose_path(result.pose_path)
-                    continue
-
-                try:
-                    pose_text = pose_file.read_text(encoding="utf-8")
-                    modes = parse_log(result.log_text)
-                    atoms = parse_pose(pose_text)
-                    if not modes or not atoms:
-                        seed_parse_failed += 1
-                        continue
-
-                    fingerprint = compute_fingerprint(
-                        atoms,
-                        protein_residues,
-                        target_config.pocket,
-                    )
-                    new_bits = cov_map.update(fingerprint)
-                    affinity = modes[0].affinity
-
-                    current_stage = "seed_oracle"
-                    emit_progress()
-                    verdict = evaluate(modes, pose_text, target_config.oracle)
-
-                    if best_affinity is None or affinity < best_affinity:
-                        best_affinity = affinity
-
-                    seed_successful_candidates.append(
-                        (
-                            affinity,
-                            smiles,
-                            source_id,
-                            len(new_bits),
-                            1 if verdict.is_hit else 0,
-                        )
-                    )
-                    if not new_bits and not verdict.is_hit:
-                        seed_non_interesting += 1
-                        continue
-
-                    seed_entry = CorpusEntry(
-                        smiles=smiles,
-                        source_id=source_id,
-                        priority=0.1,
-                        best_affinity=affinity,
-                        new_bits=len(new_bits),
-                        finds=1 if verdict.is_hit else 0,
-                    )
-                    seed_entry.priority = score_corpus_entry(
-                        seed_entry,
-                        priority_new_bit_weight=priority_new_bit_weight,
-                        priority_affinity_weight=priority_affinity_weight,
-                        priority_reuse_penalty=priority_reuse_penalty,
-                    )
-                    corpus.add(seed_entry)
-                    seed_interesting += 1
-                    interesting_smiles.add(smiles)
-                finally:
-                    _cleanup_pose_path(result.pose_path)
+            flush_seed_batch()
 
             if (
                 seed_interesting < SEED_FALLBACK_MIN_INTERESTING
@@ -687,27 +781,20 @@ def run(
                 ]
                 record_dock_attempts(len(prepared))
                 results_by_idx: list[DockingResult | None] = [None] * len(prepared)
-                iterator = pool.imap_unordered(_dock_worker, jobs)
+                try:
+                    iterator = pool.imap_unordered(_dock_worker, jobs)
+                except Exception as exc:
+                    raise_manual_abort_on_pool_pipe_error(exc)
+                    raise
                 pending = len(prepared)
                 while pending > 0:
                     try:
                         idx, result = iterator.next(timeout=0.2)
                     except PoolTimeoutError:
                         continue
-                    except (BrokenPipeError, EOFError) as exc:
-                        log(
-                            "[WARN] pool result channel closed during docking collection; "
-                            "treating as manual abort"
-                        )
-                        raise KeyboardInterrupt from exc
-                    except OSError as exc:
-                        if getattr(exc, "errno", None) != errno.EPIPE:
-                            raise
-                        log(
-                            "[WARN] pool result channel closed during docking collection; "
-                            "treating as manual abort"
-                        )
-                        raise KeyboardInterrupt from exc
+                    except Exception as exc:
+                        raise_manual_abort_on_pool_pipe_error(exc)
+                        raise
                     results_by_idx[idx] = result
                     pending -= 1
                     record_dock_completion(result)
