@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pytest
 
@@ -1279,3 +1280,174 @@ def test_run_preserves_manual_abort_when_final_checkpoint_save_fails(
     assert stats["stopped_reason"] == "keyboard_interrupt"
     assert "failure_reason" not in stats
     assert any("failed to save final checkpoints after manual abort" in message for message in messages)
+
+
+def test_run_uses_single_chunk_pool_dispatch_for_seed_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    class FakeIterator:
+        def __init__(self, result: tuple[int, DockingResult]) -> None:
+            self._result = result
+            self._sent = False
+
+        def next(self, timeout=None):  # noqa: ANN001 - multiprocessing iterator compatibility
+            if self._sent:
+                raise AssertionError("seed iterator consumed too many times")
+            self._sent = True
+            return self._result
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.chunksizes: list[int | None] = []
+
+        def imap_unordered(self, _fn, jobs, chunksize=None):
+            self.chunksizes.append(chunksize)
+            job_list = list(jobs)
+            idx, _pdbqt, _target_cfg, _exhaustiveness, _num_modes, _engine = job_list[0]
+            pose_path = output_dir / "seed_pose.pdbqt"
+            pose_path.write_text(
+                "MODEL 1\n"
+                "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+                "ENDMDL\n",
+                encoding="utf-8",
+            )
+            return FakeIterator(
+                (
+                    idx,
+                    DockingResult(
+                        success=True,
+                        log_text="   1       -8.0      0.000      0.000\n",
+                        pose_path=str(pose_path),
+                        error=None,
+                        completed=True,
+                    ),
+                )
+            )
+
+        def close(self) -> None:
+            return
+
+        def terminate(self) -> None:
+            return
+
+        def join(self) -> None:
+            return
+
+    fake_pool = FakePool()
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=2,
+    )
+
+    assert stats["attempted_docks"] == 1
+    assert stats["completed_docks"] == 1
+    assert fake_pool.chunksizes == [1]
+
+
+def test_run_falls_back_to_single_worker_when_pool_creation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+    messages: list[str] = []
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=4,
+        logger=messages.append,
+    )
+
+    assert stats["stopped_reason"] == "max_iterations"
+    assert stats["attempted_docks"] == 1
+    assert stats["completed_docks"] == 1
+    assert any("failed to start worker pool" in message for message in messages)
+
+
+def test_run_does_not_block_when_pool_join_hangs_after_manual_abort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "POOL_ABORT_JOIN_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(fuzzer_module, "POOL_ABORT_JOIN_GRACE_SECONDS", 0.02)
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.alive = True
+            self.killed = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def kill(self) -> None:
+            self.killed = True
+            self.alive = False
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.terminated = False
+            self._pool = [FakeWorker(), FakeWorker()]
+
+        def imap_unordered(self, _fn, _jobs):
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            return
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            time.sleep(2.0)
+
+    fake_pool = FakePool()
+    messages: list[str] = []
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    start = time.monotonic()
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=2,
+        logger=messages.append,
+    )
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5
+    assert stats["stopped_reason"] == "keyboard_interrupt"
+    assert fake_pool.terminated is True
+    assert all(worker.killed for worker in fake_pool._pool)
+    assert any("worker pool join timed out" in message for message in messages)

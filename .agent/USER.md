@@ -1,3 +1,16 @@
+## 2026-04-13 - Parallelism abort hardening and pool resilience follow-up
+
+- Added bounded manual-abort pool shutdown in `biofuzz/core/fuzzer.py`: pool join now runs in a daemon helper path with timeout, then force-kills worker processes when join stalls so Ctrl-C shutdown cannot hang indefinitely.
+- Kept graceful-abort semantics intact (`stopped_reason=keyboard_interrupt`, checkpoint attempt preserved), but removed the hard dependency on a successful blocking `pool.join()` during manual abort.
+- Added worker-pool startup fallback: if `Pool(...)` fails at runtime, BioFuzz logs a warning and continues in single-worker mode instead of failing the run.
+- Improved docking parallelism granularity by dispatching pool work with `chunksize=1` (with compatibility fallback for test doubles that do not accept chunksize), reducing load imbalance on heterogeneous docking durations.
+- Increased seed docking batch depth from `workers * 2` to `workers * 4` to reduce repeated pool submission overhead while keeping bounded in-memory batches.
+- Expanded closed-channel detection for pool teardown/result paths to include additional reset/closed-handle cases.
+- Added regression coverage in `tests/test_fuzzer.py` for:
+  - non-blocking manual-abort shutdown when `pool.join()` hangs,
+  - startup fallback when pool creation fails,
+  - single-chunk pool dispatch wiring.
+
 ## 2026-04-12 - Ctrl-C spam resilience for multiprocessing campaigns
 
 - Added a SIGINT guard in `biofuzz/core/fuzzer.py` that only promotes the first Ctrl-C to `KeyboardInterrupt`; subsequent Ctrl-C signals are ignored during cleanup.

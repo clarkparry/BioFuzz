@@ -1,0 +1,30 @@
+Task: Audit and harden parallel docking behavior for throughput and shutdown resilience, with emphasis on broken-pipe handling and Ctrl-C responsiveness.
+
+Challenges:
+- The fuzzer ignored SIGINT during teardown, then called blocking `pool.join()`. If worker shutdown stalled, Ctrl-C could appear unresponsive.
+- Worker-pool startup failures caused immediate run failure instead of degrading gracefully to single-worker mode.
+- Parallel seed/mutation dispatch used default multiprocessing chunking, which can reduce load balancing and early result flow on heterogeneous docking durations.
+
+Approach:
+- Keep existing pool-based parallelism model, but harden failure surfaces around startup and teardown.
+- Make manual-abort shutdown bounded so the parent can finish cleanup even if join stalls.
+- Improve dispatch granularity for better worker utilization without changing sequential corpus/coverage mutation semantics.
+
+Completed Approach:
+- Added bounded join behavior for manual aborts in `biofuzz/core/fuzzer.py`:
+  - join runs in a daemon helper thread,
+  - if timeout is hit, worker processes are force-killed,
+  - shutdown continues without indefinite blocking.
+- Added worker-pool creation fallback: when `Pool(...)` fails, BioFuzz logs a warning and continues in single-worker mode.
+- Added single-chunk pool dispatch (`chunksize=1`) for seed and mutation job submission to improve load balancing and result latency; retained compatibility with test doubles lacking `chunksize` support.
+- Increased seed docking batch depth from `workers * 2` to `workers * 4` to reduce pool-submission overhead while retaining bounded memory behavior.
+- Expanded pool-channel error detection to include additional closed-channel cases (`ConnectionResetError`, `ECONNRESET`, `EBADF`, and closed-handle ValueErrors).
+
+Outcome:
+- Ctrl-C manual abort now avoids indefinite teardown hangs caused by blocking pool join.
+- Parallel runs remain fast while becoming more resilient to startup and pipe/channel edge cases.
+- Added regression tests in `tests/test_fuzzer.py` for:
+  - single-chunk pool dispatch,
+  - pool startup fallback to serial mode,
+  - non-blocking manual-abort shutdown when pool join hangs.
+- Verification status: `.venv/bin/python -m pytest -q` -> `98 passed`.

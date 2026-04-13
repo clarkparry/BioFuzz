@@ -6,6 +6,7 @@
 
 ## Completed
 
+- `2026-04-13_parallelism_abort_resilience_and_pool_shutdown_timeout.txt` — hardened manual-abort pool teardown with bounded join + force-kill fallback, added single-worker fallback when pool startup fails, tuned parallel dispatch chunking, and added regression coverage for these paths.
 - `2026-04-12_gnina_dependency_preflight_generalization.txt` — removed machine-local GNINA wrapper workaround and added generalized runtime preflight checks that report exact missing shared libraries for the requested docking engine.
 - `2026-04-12_gnina_runtime_dependency_user_space_cudnn_install.txt` — installed user-space CUDA/cuDNN runtimes into `.venv`, wrapped repo-local GNINA to export NVIDIA lib paths, and fixed GNINA log parsing so live GNINA docking is runnable and triaged correctly without root apt access.
 - `2026-04-12_seed_fallback_dock_telemetry_and_engine_resilience.txt` — added top-K seed fallback bootstrap, attempted-vs-completed dock telemetry with TUI staleness signaling, repo-local GNINA runnability fallback, and seed-preparation retry logic that prevents large pre-dock seed drops.

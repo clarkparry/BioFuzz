@@ -6,6 +6,7 @@ import json
 import errno
 import signal
 import sys
+import threading
 import time
 import traceback
 from typing import Callable
@@ -27,6 +28,11 @@ from biofuzz.storage.findings import FindingsStore
 
 SEED_FALLBACK_MIN_INTERESTING = 64
 SEED_FALLBACK_TOP_K = 256
+SEED_DOCK_BATCH_MULTIPLIER = 4
+POOL_DOCK_CHUNKSIZE = 1
+POOL_RESULT_POLL_TIMEOUT_SECONDS = 0.2
+POOL_ABORT_JOIN_TIMEOUT_SECONDS = 2.0
+POOL_ABORT_JOIN_GRACE_SECONDS = 0.5
 
 
 def load_smiles(seed_smiles_path: str | Path) -> list[tuple[str, str]]:
@@ -241,6 +247,61 @@ def _dock_completed(result: DockingResult) -> bool:
     return result.success
 
 
+def _pool_imap_unordered_single_chunk(
+    pool: object,
+    jobs: list[tuple[int, str, TargetConfig, int, int, str]],
+):
+    try:
+        return pool.imap_unordered(_dock_worker, jobs, chunksize=POOL_DOCK_CHUNKSIZE)  # type: ignore[attr-defined]
+    except TypeError as exc:
+        # Test doubles may expose `imap_unordered(fn, jobs)` without chunksize support.
+        if "chunksize" not in str(exc):
+            raise
+        return pool.imap_unordered(_dock_worker, jobs)  # type: ignore[attr-defined]
+
+
+def _start_pool_join_thread(pool: object) -> tuple[threading.Event, list[BaseException]]:
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def join_target() -> None:
+        try:
+            pool.join()  # type: ignore[attr-defined]
+        except BaseException as exc:  # pragma: no cover - propagated through `errors`.
+            errors.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(
+        target=join_target,
+        name="biofuzz_pool_join",
+        daemon=True,
+    ).start()
+    return done, errors
+
+
+def _force_kill_pool_workers(pool: object) -> int:
+    workers = getattr(pool, "_pool", None)
+    if workers is None:
+        return 0
+
+    killed = 0
+    for worker in workers:
+        try:
+            if hasattr(worker, "is_alive") and not worker.is_alive():
+                continue
+            if hasattr(worker, "kill"):
+                worker.kill()
+                killed += 1
+                continue
+            if hasattr(worker, "terminate"):
+                worker.terminate()
+                killed += 1
+        except Exception:
+            continue
+    return killed
+
+
 def run(
     target_config: TargetConfig,
     seed_smiles_path: str | Path,
@@ -446,9 +507,17 @@ def run(
         return verdict
 
     def is_pool_pipe_error(exc: BaseException) -> bool:
-        if isinstance(exc, (BrokenPipeError, EOFError)):
+        if isinstance(exc, (BrokenPipeError, EOFError, ConnectionResetError)):
             return True
-        return isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EPIPE
+        if isinstance(exc, OSError) and getattr(exc, "errno", None) in {
+            errno.EPIPE,
+            errno.ECONNRESET,
+            errno.EBADF,
+        }:
+            return True
+        if isinstance(exc, ValueError) and "closed" in str(exc).lower():
+            return True
+        return False
 
     def raise_manual_abort_on_pool_pipe_error(exc: BaseException) -> None:
         if is_pool_pipe_error(exc):
@@ -540,11 +609,16 @@ def run(
             pass
 
     install_sigint_guard()
-    pool = (
-        Pool(processes=workers, initializer=_pool_worker_init_ignore_sigint)
-        if workers > 1
-        else None
-    )
+    pool = None
+    if workers > 1:
+        try:
+            pool = Pool(processes=workers, initializer=_pool_worker_init_ignore_sigint)
+        except Exception as exc:
+            log(
+                "[WARN] failed to start worker pool with workers={}; "
+                "continuing in single-worker mode: {}: {}"
+                .format(workers, type(exc).__name__, exc)
+            )
 
     if corpus.size() == 0:
         try:
@@ -561,7 +635,7 @@ def run(
             seed_successful_candidates: list[tuple[float, str, str, int, int]] = []
             interesting_smiles: set[str] = set()
             seed_pending: list[tuple[str, str, str]] = []
-            seed_dock_batch_size = max(1, workers * 2)
+            seed_dock_batch_size = max(1, workers * SEED_DOCK_BATCH_MULTIPLIER)
 
             def process_seed_result(
                 smiles: str,
@@ -681,14 +755,14 @@ def run(
                     seed_attempted += len(jobs)
                     results_by_idx: list[DockingResult | None] = [None] * len(batch)
                     try:
-                        iterator = pool.imap_unordered(_dock_worker, jobs)
+                        iterator = _pool_imap_unordered_single_chunk(pool, jobs)
                     except Exception as exc:
                         raise_manual_abort_on_pool_pipe_error(exc)
                         raise
                     pending = len(batch)
                     while pending > 0:
                         try:
-                            idx, result = iterator.next(timeout=0.2)
+                            idx, result = iterator.next(timeout=POOL_RESULT_POLL_TIMEOUT_SECONDS)
                         except PoolTimeoutError:
                             if abort_requested:
                                 raise KeyboardInterrupt
@@ -935,14 +1009,14 @@ def run(
                 record_dock_attempts(len(prepared))
                 results_by_idx: list[DockingResult | None] = [None] * len(prepared)
                 try:
-                    iterator = pool.imap_unordered(_dock_worker, jobs)
+                    iterator = _pool_imap_unordered_single_chunk(pool, jobs)
                 except Exception as exc:
                     raise_manual_abort_on_pool_pipe_error(exc)
                     raise
                 pending = len(prepared)
                 while pending > 0:
                     try:
-                        idx, result = iterator.next(timeout=0.2)
+                        idx, result = iterator.next(timeout=POOL_RESULT_POLL_TIMEOUT_SECONDS)
                     except PoolTimeoutError:
                         if abort_requested:
                             raise KeyboardInterrupt
@@ -1091,7 +1165,26 @@ def run(
                         log(f"[WARN] worker pool shutdown step failed: {type(exc).__name__}: {exc}")
             finally:
                 try:
-                    pool.join()
+                    if stopped_reason == "keyboard_interrupt":
+                        join_done, join_errors = _start_pool_join_thread(pool)
+                        if not join_done.wait(POOL_ABORT_JOIN_TIMEOUT_SECONDS):
+                            killed_workers = _force_kill_pool_workers(pool)
+                            log(
+                                "[WARN] worker pool join timed out after {:.1f}s during manual abort; "
+                                "forced kill sent to {} worker(s)"
+                                .format(POOL_ABORT_JOIN_TIMEOUT_SECONDS, killed_workers)
+                            )
+                            join_done.wait(POOL_ABORT_JOIN_GRACE_SECONDS)
+                        if join_done.is_set():
+                            if join_errors:
+                                raise join_errors[0]
+                        else:
+                            log(
+                                "[WARN] worker pool join still pending after forced kill; "
+                                "continuing shutdown without blocking"
+                            )
+                    else:
+                        pool.join()
                 except Exception as exc:
                     if not (stopped_reason == "keyboard_interrupt" and is_pool_pipe_error(exc)):
                         log(f"[WARN] worker pool join failed: {type(exc).__name__}: {exc}")

@@ -1022,3 +1022,14 @@ Validation performed:
 ## Future Work
 
 The next useful improvement is still a compact, deterministic end-to-end regression that exercises the real CLI docking loop with the checked-in HIV protease assets in both one-worker and multiprocessing modes. The current live path is working, but protecting both execution modes from silent regressions would require a carefully bounded fixture strategy so the test stays stable and fast enough for routine execution.
+
+## Phase Summary: Parallelism Abort Resilience And Pool Shutdown Timeouts
+
+This phase focused on the real runtime weak points in BioFuzz parallelism: pool startup fragility, uneven work dispatch, and teardown hangs after manual abort. The prior implementation handled many `BrokenPipe` cases, but still relied on a blocking `pool.join()` while SIGINT was suppressed, which could make Ctrl-C appear unresponsive if worker shutdown stalled.
+
+The implementation hardening was intentionally narrow: keep the existing multiprocessing architecture, but make abort teardown bounded and improve scheduling granularity. `biofuzz/core/fuzzer.py` now (1) falls back to single-worker mode if pool creation fails, (2) dispatches docking jobs with `chunksize=1` for better load balancing, (3) uses larger seed batches (`workers * 4`) to reduce pool-submission overhead, and (4) performs bounded manual-abort join handling with force-kill fallback so shutdown can continue even when join stalls.
+
+Validation performed:
+
+- `./.venv/bin/python -m pytest -q tests/test_fuzzer.py -k "single_chunk_pool_dispatch or falls_back_to_single_worker_when_pool_creation_fails or does_not_block_when_pool_join_hangs_after_manual_abort"` -> `3 passed`
+- `./.venv/bin/python -m pytest -q` -> `98 passed`

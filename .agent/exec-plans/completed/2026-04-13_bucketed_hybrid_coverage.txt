@@ -1,0 +1,23 @@
+Task: Bucketed hybrid coverage novelty
+Date: 2026-04-13
+
+Objective
+- Keep residue union coverage for interpretability.
+- Add bucket-signature novelty tracking to extend useful novelty signal after residue coverage saturates.
+- Use hybrid scheduling: score molecules from both new residue bits and new bucket signatures.
+
+Challenges
+- Preserve backward compatibility with existing coverage checkpoints and corpus checkpoints.
+- Avoid breaking existing run stats/tests that expect `coverage_ratio`.
+- Keep defaults deterministic for targets without explicit bucket definitions.
+
+Approach
+1) Extend coverage data model with bucket groups, seen signatures, and observe() API.
+2) Wire hybrid novelty into seed triage and mutation scheduling.
+3) Extend config with bucket-count and fingerprint-weight knobs.
+4) Keep legacy outputs (coverage_ratio/new_bits behavior) and add additive metrics.
+5) Update tests and documentation (README + BIOFUZZ_STRUCTURE.md).
+
+Validation
+- Run focused unit tests for coverage/corpus/fuzzer/tui/main/config.
+- Run full pytest suite.
