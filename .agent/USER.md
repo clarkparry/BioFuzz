@@ -1,3 +1,25 @@
+## 2026-04-12 - Ctrl-C spam resilience for multiprocessing campaigns
+
+- Added a SIGINT guard in `biofuzz/core/fuzzer.py` that only promotes the first Ctrl-C to `KeyboardInterrupt`; subsequent Ctrl-C signals are ignored during cleanup.
+- Pool workers now initialize with `SIGINT` ignored so manual abort control stays in the parent process; this reduces worker-side interrupt races during heavy parallel campaigns.
+- Extended pool-pipe handling so `BrokenPipeError`/`EOFError`/`EPIPE` during submission and result collection are consistently mapped to manual-abort behavior.
+- During manual abort, pool shutdown/join `BrokenPipe` cleanup noise is now suppressed (still logged for non-abort/error scenarios).
+- Added regression coverage for submission-time pipe failures and updated abort-shutdown expectations.
+
+## 2026-04-12 - Ctrl-C responsiveness fix for deferred signal handling windows
+
+- Refined SIGINT guard semantics so repeated Ctrl-C attempts continue to raise until shutdown suppression is explicitly enabled (instead of dropping all later signals after the first observed one).
+- Added an `abort_requested` flag driven by the SIGINT handler and checked in:
+  - seed load loop
+  - mutation main loop
+  - pool timeout polling loops (seed + mutation)
+- This addresses cases where Python/native multiprocessing internals delay unwind after first signal; once SIGINT is observed, the next poll/loop boundary now forces a manual abort path.
+
+## 2026-04-12 - Worker BrokenPipe traceback suppression on manual abort
+
+- Added worker initializer logic to suppress `multiprocessing` internal `BrokenPipeError` traceback spam emitted during pool teardown races after manual abort.
+- Suppression is scoped to worker processes and only hides tracebacks where the current exception is `BrokenPipeError`; normal worker exceptions continue to print as before.
+
 ## 2026-04-12 - Ctrl-C broken-pipe hardening for pool submission path
 
 - Hardened manual-abort behavior when multiprocessing pipes break during job submission (`pool.imap_unordered(...)`), not just during iterator result collection.

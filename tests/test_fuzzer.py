@@ -1022,8 +1022,8 @@ def test_run_keeps_manual_abort_reason_when_pool_shutdown_raises(
 
     assert stats["stopped_reason"] == "keyboard_interrupt"
     assert "failure_reason" not in stats
-    assert any("worker pool shutdown step failed" in message for message in messages)
-    assert any("worker pool join failed" in message for message in messages)
+    assert not any("worker pool shutdown step failed" in message for message in messages)
+    assert not any("worker pool join failed" in message for message in messages)
 
 
 def test_run_treats_pool_broken_pipe_during_mutation_submission_as_manual_abort(

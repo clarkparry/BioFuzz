@@ -5,7 +5,9 @@ from pathlib import Path
 import json
 import errno
 import signal
+import sys
 import time
+import traceback
 from typing import Callable
 
 from biofuzz.core.corpus import Corpus, CorpusEntry
@@ -181,6 +183,27 @@ def _dock_worker(payload: tuple[int, str, TargetConfig, int, int, str]) -> tuple
     return idx, result
 
 
+def _pool_worker_init_ignore_sigint() -> None:
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except ValueError:
+        # Not in main thread of interpreter.
+        pass
+    # Pool teardown can race with worker queue writes during manual abort. Suppress the
+    # resulting BrokenPipe traceback noise from multiprocessing internals in workers only.
+    if not getattr(traceback, "_biofuzz_broken_pipe_suppressed", False):
+        original_print_exc = traceback.print_exc
+
+        def quiet_print_exc(*args, **kwargs):  # type: ignore[no-untyped-def]
+            _typ, exc, _tb = sys.exc_info()
+            if isinstance(exc, BrokenPipeError):
+                return
+            return original_print_exc(*args, **kwargs)
+
+        traceback.print_exc = quiet_print_exc  # type: ignore[assignment]
+        setattr(traceback, "_biofuzz_broken_pipe_suppressed", True)
+
+
 def _cleanup_pose_path(pose_path: str | None) -> None:
     if pose_path:
         Path(pose_path).unlink(missing_ok=True)
@@ -331,14 +354,13 @@ def run(
         record_dock_completion(result)
         emit_progress()
 
-    def raise_manual_abort_on_pool_pipe_error(exc: BaseException) -> None:
+    def is_pool_pipe_error(exc: BaseException) -> bool:
         if isinstance(exc, (BrokenPipeError, EOFError)):
-            log(
-                "[WARN] pool result channel closed during docking collection; "
-                "treating as manual abort"
-            )
-            raise KeyboardInterrupt from exc
-        if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EPIPE:
+            return True
+        return isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EPIPE
+
+    def raise_manual_abort_on_pool_pipe_error(exc: BaseException) -> None:
+        if is_pool_pipe_error(exc):
             log(
                 "[WARN] pool result channel closed during docking collection; "
                 "treating as manual abort"
@@ -394,21 +416,44 @@ def run(
         8,
         exhaustiveness_confirm if exhaustiveness_confirm is not None else exhaustiveness,
     )
-    pool = Pool(processes=workers) if workers > 1 else None
     pool_needs_terminate = False
     previous_sigint_handler: int | Callable[[int, object], object] | None = None
-    sigint_suppressed = False
+    sigint_guard_installed = False
+    abort_requested = False
 
-    def suppress_sigint() -> None:
-        nonlocal previous_sigint_handler, sigint_suppressed
-        if sigint_suppressed:
+    def install_sigint_guard() -> None:
+        nonlocal previous_sigint_handler, sigint_guard_installed
+        if sigint_guard_installed:
             return
+
+        def guarded_sigint(_signum: int, _frame: object) -> None:
+            nonlocal abort_requested
+            abort_requested = True
+            raise KeyboardInterrupt
+
         try:
             previous_sigint_handler = signal.getsignal(signal.SIGINT)
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
-            sigint_suppressed = True
+            signal.signal(signal.SIGINT, guarded_sigint)
+            sigint_guard_installed = True
         except ValueError:
-            sigint_suppressed = False
+            sigint_guard_installed = False
+
+    def suppress_sigint() -> None:
+        nonlocal abort_requested
+        abort_requested = True
+        if not sigint_guard_installed:
+            return
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+        except ValueError:
+            pass
+
+    install_sigint_guard()
+    pool = (
+        Pool(processes=workers, initializer=_pool_worker_init_ignore_sigint)
+        if workers > 1
+        else None
+    )
 
     if corpus.size() == 0:
         try:
@@ -543,6 +588,8 @@ def run(
                         try:
                             idx, result = iterator.next(timeout=0.2)
                         except PoolTimeoutError:
+                            if abort_requested:
+                                raise KeyboardInterrupt
                             continue
                         except Exception as exc:
                             raise_manual_abort_on_pool_pipe_error(exc)
@@ -577,6 +624,8 @@ def run(
 
             log("[SEED] docking seeds to build initial corpus")
             for smiles, source_id in load_smiles(seed_smiles_path):
+                if abort_requested:
+                    raise KeyboardInterrupt
                 seed_total += 1
                 current_stage = "seed_prepare"
                 current_parent = source_id
@@ -701,6 +750,8 @@ def run(
     try:
         emit_progress()
         while stopped_reason == "completed":
+            if abort_requested:
+                raise KeyboardInterrupt
             if max_iterations is not None and iterations >= max_iterations:
                 stopped_reason = "max_iterations"
                 break
@@ -791,6 +842,8 @@ def run(
                     try:
                         idx, result = iterator.next(timeout=0.2)
                     except PoolTimeoutError:
+                        if abort_requested:
+                            raise KeyboardInterrupt
                         continue
                     except Exception as exc:
                         raise_manual_abort_on_pool_pipe_error(exc)
@@ -990,12 +1043,14 @@ def run(
                     else:
                         pool.close()
                 except Exception as exc:
-                    log(f"[WARN] worker pool shutdown step failed: {type(exc).__name__}: {exc}")
+                    if not (stopped_reason == "keyboard_interrupt" and is_pool_pipe_error(exc)):
+                        log(f"[WARN] worker pool shutdown step failed: {type(exc).__name__}: {exc}")
             finally:
                 try:
                     pool.join()
                 except Exception as exc:
-                    log(f"[WARN] worker pool join failed: {type(exc).__name__}: {exc}")
+                    if not (stopped_reason == "keyboard_interrupt" and is_pool_pipe_error(exc)):
+                        log(f"[WARN] worker pool join failed: {type(exc).__name__}: {exc}")
         try:
             cov_map.save(coverage_checkpoint)
             _save_corpus_checkpoints(corpus, corpus_checkpoint_paths)
@@ -1013,7 +1068,7 @@ def run(
                 current_stage = "failed"
                 log(f"[FAIL] failed to save final checkpoints: {failure_reason}")
     finally:
-        if sigint_suppressed:
+        if sigint_guard_installed:
             try:
                 signal.signal(signal.SIGINT, previous_sigint_handler)
             except ValueError:
