@@ -354,6 +354,97 @@ def run(
         record_dock_completion(result)
         emit_progress()
 
+    def evaluate_and_process_hit(
+        *,
+        smiles: str,
+        ligand_pdbqt: str,
+        modes,
+        pose_text: str,
+        initial_pose_path: str,
+        initial_affinity: float,
+        oracle_stage: str = "oracle",
+        confirm_stage: str = "confirm",
+    ):
+        nonlocal hits
+        nonlocal current_stage
+
+        current_stage = oracle_stage
+        emit_progress()
+
+        verdict = evaluate(
+            modes,
+            pose_text,
+            target_config,
+            smiles=smiles,
+            ligand_pdbqt=ligand_pdbqt,
+            selectivity_exhaustiveness=selectivity_exhaustiveness,
+            num_modes=num_modes,
+            docking_engine=engine,
+            dock_observer=observe_extra_dock,
+        )
+
+        if not verdict.is_hit:
+            return verdict
+
+        confirmed_verdict = verdict
+        confirmed_affinity = initial_affinity
+        confirmed_pose_path = initial_pose_path
+
+        if exhaustiveness_confirm is not None and exhaustiveness_confirm > 0:
+            record_dock_attempts()
+            current_stage = confirm_stage
+            emit_progress()
+            confirm_result = dock(
+                ligand_pdbqt,
+                target_config,
+                exhaustiveness=exhaustiveness_confirm,
+                num_modes=num_modes,
+                engine=engine,
+            )
+            record_dock_completion(confirm_result)
+            try:
+                if confirm_result.success and confirm_result.pose_path:
+                    confirm_pose_file = Path(confirm_result.pose_path)
+                    if confirm_pose_file.exists():
+                        confirm_pose_text = confirm_pose_file.read_text(encoding="utf-8")
+                        confirm_modes = parse_log(confirm_result.log_text)
+                        if confirm_modes:
+                            confirmed_affinity = confirm_modes[0].affinity
+                            confirmed_verdict = evaluate(
+                                confirm_modes,
+                                confirm_pose_text,
+                                target_config,
+                                smiles=smiles,
+                                ligand_pdbqt=ligand_pdbqt,
+                                selectivity_exhaustiveness=selectivity_exhaustiveness,
+                                num_modes=num_modes,
+                                docking_engine=engine,
+                                dock_observer=observe_extra_dock,
+                            )
+                            confirmed_pose_path = confirm_result.pose_path
+            finally:
+                if confirmed_pose_path != confirm_result.pose_path:
+                    _cleanup_pose_path(confirm_result.pose_path)
+
+        if confirmed_verdict.is_hit and confirmed_pose_path:
+            findings.save(
+                smiles,
+                confirmed_verdict,
+                confirmed_pose_path,
+                confirmed_affinity,
+            )
+            hits += 1
+            log(
+                "[HIT] {} | affinity={:.2f} | confirmed_exhaustiveness={}"
+                .format(smiles, confirmed_affinity, exhaustiveness_confirm)
+            )
+            if confirmed_pose_path != initial_pose_path:
+                _cleanup_pose_path(confirmed_pose_path)
+        elif confirmed_pose_path and confirmed_pose_path != initial_pose_path:
+            _cleanup_pose_path(confirmed_pose_path)
+
+        return verdict
+
     def is_pool_pipe_error(exc: BaseException) -> bool:
         if isinstance(exc, (BrokenPipeError, EOFError)):
             return True
@@ -472,14 +563,18 @@ def run(
             seed_pending: list[tuple[str, str, str]] = []
             seed_dock_batch_size = max(1, workers * 2)
 
-            def process_seed_result(smiles: str, source_id: str, result: DockingResult) -> None:
+            def process_seed_result(
+                smiles: str,
+                source_id: str,
+                ligand_pdbqt: str,
+                result: DockingResult,
+            ) -> None:
                 nonlocal seed_completed
                 nonlocal seed_dock_failed
                 nonlocal seed_parse_failed
                 nonlocal seed_non_interesting
                 nonlocal seed_interesting
                 nonlocal best_affinity
-                nonlocal current_stage
 
                 record_dock_completion(result)
                 if _dock_completed(result):
@@ -513,9 +608,16 @@ def run(
                     new_bits = cov_map.update(fingerprint)
                     affinity = modes[0].affinity
 
-                    current_stage = "seed_oracle"
-                    emit_progress()
-                    verdict = evaluate(modes, pose_text, target_config.oracle)
+                    verdict = evaluate_and_process_hit(
+                        smiles=smiles,
+                        ligand_pdbqt=ligand_pdbqt,
+                        modes=modes,
+                        pose_text=pose_text,
+                        initial_pose_path=result.pose_path,
+                        initial_affinity=affinity,
+                        oracle_stage="seed_oracle",
+                        confirm_stage="seed_confirm",
+                    )
 
                     if best_affinity is None or affinity < best_affinity:
                         best_affinity = affinity
@@ -601,7 +703,7 @@ def run(
                         current_smiles = smiles
                         current_mutation_stage = "seed"
                         current_mutation_type = "seed"
-                        process_seed_result(smiles, source_id, result)
+                        process_seed_result(smiles, source_id, _pdbqt, result)
                     if any(result is None for result in results_by_idx):
                         raise RuntimeError("worker pool returned incomplete seed docking results")
                     return
@@ -620,7 +722,7 @@ def run(
                         num_modes=num_modes,
                         engine=engine,
                     )
-                    process_seed_result(smiles, source_id, result)
+                    process_seed_result(smiles, source_id, pdbqt, result)
 
             log("[SEED] docking seeds to build initial corpus")
             for smiles, source_id in load_smiles(seed_smiles_path):
@@ -912,77 +1014,14 @@ def run(
                     new_bits = cov_map.update(fingerprint)
                     affinity = modes[0].affinity
 
-                    current_stage = "oracle"
-                    emit_progress()
-
-                    verdict = evaluate(
-                        modes,
-                        pose_text,
-                        target_config,
+                    verdict = evaluate_and_process_hit(
                         smiles=smiles,
                         ligand_pdbqt=pdbqt,
-                        selectivity_exhaustiveness=selectivity_exhaustiveness,
-                        num_modes=num_modes,
-                        docking_engine=engine,
-                        dock_observer=observe_extra_dock,
+                        modes=modes,
+                        pose_text=pose_text,
+                        initial_pose_path=result.pose_path,
+                        initial_affinity=affinity,
                     )
-                    if verdict.is_hit:
-                        confirmed_verdict = verdict
-                        confirmed_affinity = affinity
-                        confirmed_pose_path = result.pose_path
-
-                        if exhaustiveness_confirm is not None and exhaustiveness_confirm > 0:
-                            record_dock_attempts()
-                            current_stage = "confirm"
-                            emit_progress()
-                            confirm_result = dock(
-                                pdbqt,
-                                target_config,
-                                exhaustiveness=exhaustiveness_confirm,
-                                num_modes=num_modes,
-                                engine=engine,
-                            )
-                            record_dock_completion(confirm_result)
-                            try:
-                                if confirm_result.success and confirm_result.pose_path:
-                                    confirm_pose_file = Path(confirm_result.pose_path)
-                                    if confirm_pose_file.exists():
-                                        confirm_pose_text = confirm_pose_file.read_text(encoding="utf-8")
-                                        confirm_modes = parse_log(confirm_result.log_text)
-                                        if confirm_modes:
-                                            confirmed_affinity = confirm_modes[0].affinity
-                                            confirmed_verdict = evaluate(
-                                                confirm_modes,
-                                                confirm_pose_text,
-                                                target_config,
-                                                smiles=smiles,
-                                                ligand_pdbqt=pdbqt,
-                                                selectivity_exhaustiveness=selectivity_exhaustiveness,
-                                                num_modes=num_modes,
-                                                docking_engine=engine,
-                                                dock_observer=observe_extra_dock,
-                                            )
-                                            confirmed_pose_path = confirm_result.pose_path
-                            finally:
-                                if confirmed_pose_path != confirm_result.pose_path:
-                                    _cleanup_pose_path(confirm_result.pose_path)
-
-                        if confirmed_verdict.is_hit and confirmed_pose_path:
-                            findings.save(
-                                smiles,
-                                confirmed_verdict,
-                                confirmed_pose_path,
-                                confirmed_affinity,
-                            )
-                            hits += 1
-                            log(
-                                "[HIT] {} | affinity={:.2f} | confirmed_exhaustiveness={}"
-                                .format(smiles, confirmed_affinity, exhaustiveness_confirm)
-                            )
-                            if confirmed_pose_path != result.pose_path:
-                                _cleanup_pose_path(confirmed_pose_path)
-                        elif confirmed_pose_path and confirmed_pose_path != result.pose_path:
-                            _cleanup_pose_path(confirmed_pose_path)
 
                     child_entry = CorpusEntry(
                         smiles=smiles,

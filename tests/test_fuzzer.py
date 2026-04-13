@@ -643,8 +643,64 @@ def test_run_confirms_hits_before_saving_findings(
 
     findings_dirs = list((output_dir / "findings").iterdir())
 
+    assert stats["hits"] == 2
+    assert docking_calls == [4, 16, 4, 16]
+    assert len(findings_dirs) == 2
+    assert all((path / "pose.pdbqt").exists() for path in findings_dirs)
+
+
+def test_run_confirms_seed_hits_before_saving_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    docking_calls: list[int] = []
+
+    def fake_dock(*args, **kwargs) -> DockingResult:
+        docking_calls.append(kwargs["exhaustiveness"])
+        pose_path = output_dir / f"pose_{len(docking_calls)}.pdbqt"
+        pose_path.write_text(
+            "MODEL 1\n"
+            "ATOM      1  C1  LIG A   1       0.5   0.0   0.0  0.00  0.00  0.000 C\n"
+            "ENDMDL\n",
+            encoding="utf-8",
+        )
+        affinity = -10.2 if len(docking_calls) == 1 else -10.5
+        return DockingResult(
+            success=True,
+            log_text=f"   1       {affinity:.1f}      0.000      0.000\n",
+            pose_path=str(pose_path),
+            error=None,
+        )
+
+    monkeypatch.setattr(fuzzer_module, "dock", fake_dock)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=1,
+        exhaustiveness=4,
+        exhaustiveness_confirm=16,
+    )
+
+    findings_dirs = list((output_dir / "findings").iterdir())
+
     assert stats["hits"] == 1
-    assert docking_calls == [4, 4, 16]
+    assert stats["total_docks"] == 2
+    assert docking_calls == [4, 16]
     assert len(findings_dirs) == 1
     assert (findings_dirs[0] / "pose.pdbqt").exists()
 
@@ -763,7 +819,7 @@ def test_run_counts_selectivity_docks_in_total_docks(
     )
 
     assert stats["iterations"] == 1
-    assert stats["total_docks"] == 3
+    assert stats["total_docks"] == 4
 
 
 def test_run_terminates_worker_pool_and_saves_checkpoints_on_manual_quit(
