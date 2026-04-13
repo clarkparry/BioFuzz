@@ -31,6 +31,7 @@ SEED_FALLBACK_TOP_K = 256
 SEED_DOCK_BATCH_MULTIPLIER = 4
 POOL_DOCK_CHUNKSIZE = 1
 POOL_RESULT_POLL_TIMEOUT_SECONDS = 0.2
+PROGRESS_HEARTBEAT_SECONDS = 1.0
 POOL_ABORT_JOIN_TIMEOUT_SECONDS = 2.0
 POOL_ABORT_JOIN_GRACE_SECONDS = 0.5
 
@@ -352,6 +353,7 @@ def run(
     first_attempt_elapsed_seconds: float | None = None
     last_completed_dock_elapsed_seconds: float | None = None
     runtime_gpu_active: bool | None = None
+    last_progress_emit_elapsed_seconds = -float("inf")
 
     def record_dock_attempts(count: int = 1) -> None:
         nonlocal attempted_docks, first_attempt_elapsed_seconds
@@ -372,9 +374,11 @@ def run(
             last_completed_dock_elapsed_seconds = elapsed_seconds()
 
     def emit_progress(force_stage: str | None = None) -> None:
+        nonlocal last_progress_emit_elapsed_seconds
         if progress_callback is None:
             return
         elapsed = elapsed_seconds()
+        last_progress_emit_elapsed_seconds = elapsed
         completed_dock_staleness_seconds: float | None = None
         if attempted_docks > 0:
             if completed_docks > 0 and last_completed_dock_elapsed_seconds is not None:
@@ -409,6 +413,13 @@ def run(
                 gpu_active=runtime_gpu_active,
             )
         )
+
+    def emit_progress_heartbeat(force_stage: str | None = None) -> None:
+        if progress_callback is None:
+            return
+        if elapsed_seconds() - last_progress_emit_elapsed_seconds < PROGRESS_HEARTBEAT_SECONDS:
+            return
+        emit_progress(force_stage)
 
     def observe_extra_dock(result: DockingResult) -> None:
         record_dock_attempts()
@@ -766,6 +777,7 @@ def run(
                         except PoolTimeoutError:
                             if abort_requested:
                                 raise KeyboardInterrupt
+                            emit_progress_heartbeat("seed_dock")
                             continue
                         except Exception as exc:
                             raise_manual_abort_on_pool_pipe_error(exc)
@@ -1020,6 +1032,7 @@ def run(
                     except PoolTimeoutError:
                         if abort_requested:
                             raise KeyboardInterrupt
+                        emit_progress_heartbeat("dock")
                         continue
                     except Exception as exc:
                         raise_manual_abort_on_pool_pipe_error(exc)

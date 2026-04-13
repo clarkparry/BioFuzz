@@ -224,6 +224,102 @@ def test_run_parallelizes_seed_docking_when_workers_gt_one(
     assert stats["completed_docks"] == 2
 
 
+def test_run_emits_progress_heartbeat_while_waiting_for_seed_pool_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text("ATOM      1  N   MET A   1       0.0   0.0   0.0\n", encoding="utf-8")
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    pose_path = output_dir / "seed_pool_pose_0.pdbqt"
+    pose_path.write_text(
+        "MODEL 1\n"
+        "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+        "ENDMDL\n",
+        encoding="utf-8",
+    )
+    result = (
+        0,
+        DockingResult(
+            success=True,
+            log_text="   1       -8.0      0.000      0.000\n",
+            pose_path=str(pose_path),
+            error=None,
+            completed=True,
+        ),
+    )
+
+    class FakeIterator:
+        def __init__(self) -> None:
+            self.timeouts_remaining = 3
+            self.sent = False
+
+        def next(self, timeout=None):  # noqa: ANN001 - multiprocessing iterator compatibility
+            if self.timeouts_remaining > 0:
+                self.timeouts_remaining -= 1
+                raise fuzzer_module.PoolTimeoutError()
+            if self.sent:
+                raise AssertionError("seed iterator consumed too many times")
+            self.sent = True
+            return result
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.closed = False
+            self.terminated = False
+            self.joined = False
+
+        def imap_unordered(self, _fn, _jobs):
+            return FakeIterator()
+
+        def close(self) -> None:
+            self.closed = True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    fake_pool = FakePool()
+    monkeypatch.setattr(fuzzer_module, "Pool", lambda *args, **kwargs: fake_pool)
+
+    now = {"value": 0.0}
+
+    def fake_monotonic() -> float:
+        now["value"] += 0.6
+        return now["value"]
+
+    monkeypatch.setattr(fuzzer_module.time, "monotonic", fake_monotonic)
+
+    statuses = []
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=2,
+        progress_callback=statuses.append,
+    )
+
+    seed_wait_updates = [
+        status
+        for status in statuses
+        if status.stage == "seed_dock" and status.total_docks == 1 and status.completed_docks == 0
+    ]
+    assert len(seed_wait_updates) >= 2
+    assert stats["completed_docks"] == 1
+    assert fake_pool.closed is True
+    assert fake_pool.terminated is False
+    assert fake_pool.joined is True
+
+
 def test_run_reports_attempted_vs_completed_docks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
