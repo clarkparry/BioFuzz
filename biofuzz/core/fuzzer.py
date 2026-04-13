@@ -968,7 +968,12 @@ def run(
                                     _cleanup_pose_path(confirm_result.pose_path)
 
                         if confirmed_verdict.is_hit and confirmed_pose_path:
-                            findings.save(smiles, confirmed_verdict, confirmed_pose_path)
+                            findings.save(
+                                smiles,
+                                confirmed_verdict,
+                                confirmed_pose_path,
+                                confirmed_affinity,
+                            )
                             hits += 1
                             log(
                                 "[HIT] {} | affinity={:.2f} | confirmed_exhaustiveness={}"

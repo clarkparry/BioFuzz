@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
-import hashlib
 import json
+import math
 from pathlib import Path
 import shutil
 import time
@@ -14,12 +14,35 @@ class FindingsStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def _entry_id(self, smiles: str) -> str:
-        digest = hashlib.sha1(smiles.encode("utf-8")).hexdigest()[:12]
-        return f"{time.time_ns()}_{digest}"
+    def _next_finding_id(self) -> int:
+        max_id = 0
+        for path in self.root.iterdir():
+            if not path.is_dir():
+                continue
+            entry_id = path.name.split("_", 1)[0]
+            if entry_id.isdigit():
+                max_id = max(max_id, int(entry_id))
+        return max_id + 1
 
-    def save(self, smiles: str, verdict: Any, pose_path: str | Path) -> Path:
-        entry_id = self._entry_id(smiles)
+    def _entry_id(self, finding_id: int, confirmed_affinity: float) -> str:
+        timestamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+        affinity = float(confirmed_affinity)
+        affinity_token = (
+            f"{affinity:.2f}" if math.isfinite(affinity) else "unknown_affinity"
+        )
+        return f"{finding_id:06d}_{timestamp}_{affinity_token}"
+
+    def save(
+        self,
+        smiles: str,
+        verdict: Any,
+        pose_path: str | Path,
+        confirmed_affinity: float,
+    ) -> Path:
+        entry_id = self._entry_id(
+            finding_id=self._next_finding_id(),
+            confirmed_affinity=confirmed_affinity,
+        )
         entry_dir = self.root / entry_id
         entry_dir.mkdir(parents=True, exist_ok=True)
 
