@@ -43,11 +43,11 @@ def test_prepare_smiles_can_opt_into_fallback_writer(monkeypatch) -> None:
 def test_prepare_smiles_forwards_drug_like_thresholds(monkeypatch) -> None:
     captured: dict[str, float | int] = {}
 
-    def fake_is_drug_like(smiles: str, **kwargs):
+    def fake_is_drug_like_mol(mol, **kwargs):
         captured.update(kwargs)
         return False
 
-    monkeypatch.setattr(preparation, "is_drug_like", fake_is_drug_like)
+    monkeypatch.setattr(preparation, "is_drug_like_mol", fake_is_drug_like_mol)
 
     assert (
         preparation.prepare_smiles(

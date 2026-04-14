@@ -8,7 +8,7 @@ try:
 except ImportError:  # pragma: no cover - handled by runtime behavior
     Chem = None  # type: ignore[assignment]
 
-from biofuzz.molecules.filters import is_drug_like
+from biofuzz.molecules.filters import is_drug_like_mol
 
 
 @dataclass(frozen=True)
@@ -18,13 +18,13 @@ class MutationCandidate:
     mutation_type: str
 
 
-def _sanitize_and_smiles(mol) -> str | None:
+def _sanitize_and_smiles(mol) -> tuple[object, str] | None:
     assert Chem is not None
     try:
         Chem.SanitizeMol(mol)
     except Exception:
         return None
-    return Chem.MolToSmiles(mol, canonical=True)
+    return mol, Chem.MolToSmiles(mol, canonical=True)
 
 
 def atom_type_swap(mol, rng: random.Random):
@@ -156,12 +156,15 @@ def mutate_with_metadata(
         if mutated is None:
             continue
 
-        candidate = _sanitize_and_smiles(mutated)
-        if candidate is None or candidate == start_smiles:
+        sanitized = _sanitize_and_smiles(mutated)
+        if sanitized is None:
+            continue
+        sanitized_mol, candidate = sanitized
+        if candidate == start_smiles:
             continue
 
-        if not is_drug_like(
-            candidate,
+        if not is_drug_like_mol(
+            sanitized_mol,
             min_mw=min_mw,
             max_mw=max_mw,
             max_logp=max_logp,

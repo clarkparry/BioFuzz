@@ -1,0 +1,34 @@
+Task: Audit BioFuzz for release-ready accuracy/speed improvements, apply low-risk hot-path fixes, remove unnecessary work, and record major findings for the user.
+
+Challenges:
+- The changes had to favor measurable fuzzing quality or throughput gains without widening the release scope or adding speculative complexity.
+- The oracle path mixed confirmation and selectivity in a way that could waste docks and accidentally reward unconfirmed hits.
+- The hot preparation/mutation path did repeated RDKit parsing and the coverage path still considered receptor hydrogens during contact calculation.
+
+Approach:
+- Review the real hot path end-to-end: seed triage, preparation, mutation, docking, coverage, oracle, and checkpoint/corpus updates.
+- Make only narrow fixes that either remove redundant work or tighten scoring semantics without changing the overall architecture.
+- Add regression coverage around every behavioral change and re-verify with both the unit suite and a bounded live docking run.
+
+Completed Approach:
+- Fixed `biofuzz/core/fuzzer.py` hit finalization so confirmation happens before the expensive selectivity gate, selectivity is no longer run twice for the same candidate, and corpus `finds` only reflects confirmed hits.
+- Deduplicated exact duplicate seed SMILES before seed docking so repeated seeds no longer burn docking time during corpus bootstrap.
+- Reused parsed/sanitized RDKit mols in `biofuzz/molecules/filters.py`, `preparation.py`, and `mutator.py` instead of reparsing SMILES in the hot path.
+- Updated `biofuzz/protein/residues.py` to skip receptor hydrogens, reducing unnecessary contact-distance checks and avoiding hydrogen-only contact inflation in coverage fingerprints.
+- Removed the unused `_gpu_enabled()` helper from `main.py`.
+- Added regression coverage for:
+  - mol-based drug-like filtering,
+  - receptor-hydrogen skipping,
+  - deferred selectivity,
+  - unconfirmed-hit corpus accounting,
+  - duplicate-seed skipping.
+
+Outcome:
+- BioFuzz now spends fewer docks on redundant oracle work and duplicate seeds while keeping the same overall campaign behavior.
+- Coverage fingerprints are slightly more faithful to heavy-atom contact intent and slightly cheaper to compute.
+- The release still has one notable known limitation: coverage residue IDs remain chain-insensitive, so multimeric targets can still alias residues that share the same sequence number.
+
+Validation:
+- `./.venv/bin/python -m pytest -q` -> `120 passed`
+- `./.venv/bin/python .agent/tools/runtime_audit.py` -> `live_run_ready: True`
+- `./.venv/bin/python -u - <<'PY' ... run(... max_iterations=1, workers=2, engine='vina') ... PY` using a 1-seed HIV protease smoke corpus -> completed successfully with `iterations=1`, `hits=0`, `corpus_size=2`, `total_docks=3`, `completed_docks=3`

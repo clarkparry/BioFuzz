@@ -7,6 +7,7 @@ from biofuzz.core.coverage import CoverageMap, validate_coverage_settings
 from biofuzz.docking.config import PocketConfig
 from biofuzz.docking.parser import PoseAtom
 from biofuzz.protein.pocket import compute_fingerprint
+from biofuzz.protein.residues import parse_protein_residues
 
 
 def test_coverage_update_and_persistence(tmp_path: Path) -> None:
@@ -139,3 +140,12 @@ def test_compute_fingerprint_ignores_hydrogen_only_contacts() -> None:
     ]
 
     assert compute_fingerprint(atoms, protein_residues, pocket) == frozenset()
+
+
+def test_parse_protein_residues_skips_receptor_hydrogens() -> None:
+    pdbqt = (
+        "ATOM      1  H1  MET A   8       0.000   0.000   0.000  0.00  0.00  0.000 HD\n"
+        "ATOM      2  CA  MET A   8       1.000   1.000   1.000  0.00  0.00  0.000 C\n"
+    )
+
+    assert parse_protein_residues(pdbqt) == {8: [(1.0, 1.0, 1.0)]}

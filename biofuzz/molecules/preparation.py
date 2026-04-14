@@ -9,7 +9,7 @@ except ImportError:  # pragma: no cover - dependency check is explicit at runtim
     Chem = None  # type: ignore[assignment]
     AllChem = rdMolDescriptors = None  # type: ignore[assignment]
 
-from biofuzz.molecules.filters import is_drug_like
+from biofuzz.molecules.filters import is_drug_like_mol
 
 
 def meeko_available() -> bool:
@@ -162,8 +162,12 @@ def prepare_smiles(
     if Chem is None or AllChem is None:
         return None
 
-    if require_drug_like and not is_drug_like(
-        smiles,
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+
+    if require_drug_like and not is_drug_like_mol(
+        mol,
         min_mw=min_mw,
         max_mw=max_mw,
         max_logp=max_logp,
@@ -171,10 +175,6 @@ def prepare_smiles(
         max_hba=max_hba,
         max_rot_bonds=max_rot_bonds,
     ):
-        return None
-
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
         return None
 
     mol = Chem.AddHs(mol)

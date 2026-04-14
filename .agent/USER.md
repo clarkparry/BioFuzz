@@ -151,3 +151,13 @@
 - Changed normal TUI `update()`, `notice()`, and run-log refreshes to honor `refresh_seconds` instead of forcing a full repaint for every progress event.
 - Disabled the fuzzer-side pool-wait heartbeat during TUI-enabled runs so interactive sessions do not pay for two independent timer/redraw loops.
 - Regression coverage now protects redraw coalescing, fuzzer-heartbeat disablement for TUI runs, and continued one-second timer advancement in the TUI.
+
+## 2026-04-14 - Release accuracy/speed tuning findings
+
+- Fixed a real oracle-accounting issue in `biofuzz/core/fuzzer.py`: BioFuzz had been evaluating selectivity before confirmation and then returning the pre-confirm verdict to corpus scoring, which meant expensive off-target docks could happen twice and unconfirmed hits could still increase `finds`.
+- Deferred selectivity until after confirmation docking when confirmation is enabled. This keeps final hit quality the same, avoids redundant off-target work, and makes corpus power scheduling reflect only confirmed hits.
+- Deduplicated exact duplicate seed SMILES before seed docking. This is a pure throughput optimization for release because duplicate seeds do not add new information but previously still consumed full dock/oracle work.
+- Reused parsed RDKit mols in `filters.py`, `preparation.py`, and `mutator.py` so the prep/mutation hot path no longer reparses the same SMILES repeatedly just to recompute drug-like filters.
+- Tightened coverage contact extraction by skipping receptor hydrogens during residue parsing. This removes some false-positive residue contacts and reduces distance checks without changing the overall coverage model.
+- Major remaining finding: coverage is still chain-insensitive. Pocket residues are keyed only by residue number, so multimeric targets can alias contacts like `A:42` and `B:42`. I did not change this in the release pass because it would require a cross-cutting checkpoint/config migration, but it is the main remaining accuracy limitation.
+- Secondary limitation to keep in mind: if selectivity docking is unavailable, the oracle still treats the hit as passable and records a `Selectivity skipped` note. That fail-open behavior is useful for robustness, but it means hit quality should be interpreted accordingly when off-target infrastructure is missing.

@@ -39,6 +39,7 @@ def evaluate(
     num_modes: int = 3,
     docking_engine: str = "gnina",
     dock_observer: Callable[[DockingResult], None] | None = None,
+    check_selectivity: bool = True,
 ) -> OracleVerdict:
     oracle_cfg = _oracle_config(config)
     affinity = modes[0].affinity if modes else float("inf")
@@ -63,6 +64,8 @@ def evaluate(
     selectivity_ok = True
     # Selectivity is expensive and only meaningful once affinity has already passed.
     if (
+        check_selectivity
+        and
         affinity_ok
         and isinstance(config, TargetConfig)
         and smiles

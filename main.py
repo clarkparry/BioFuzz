@@ -128,11 +128,6 @@ def _runtime_engine_details(engine: str | None) -> tuple[str, bool, str | None]:
     return display_engine, gpu_enabled, note
 
 
-def _gpu_enabled(engine: str | None) -> bool:
-    resolved = docking_runner._resolve_binary(engine)
-    return _gpu_enabled_for_binary(resolved)
-
-
 def main() -> int:
     args = parse_args()
     global_cfg = load_global_config(args.config)

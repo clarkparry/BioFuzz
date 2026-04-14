@@ -23,12 +23,8 @@ def rdkit_available() -> bool:
     return Chem is not None
 
 
-def drug_like_metrics(smiles: str) -> DrugLikeMetrics | None:
-    if Chem is None:
-        return None
-
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
+def drug_like_metrics_mol(mol) -> DrugLikeMetrics | None:
+    if Chem is None or mol is None:
         return None
 
     if len(Chem.GetMolFrags(mol)) != 1:
@@ -43,8 +39,19 @@ def drug_like_metrics(smiles: str) -> DrugLikeMetrics | None:
     )
 
 
-def is_drug_like(
-    smiles: str,
+def drug_like_metrics(smiles: str) -> DrugLikeMetrics | None:
+    if Chem is None:
+        return None
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+
+    return drug_like_metrics_mol(mol)
+
+
+def is_drug_like_mol(
+    mol,
     min_mw: float = 0.0,
     max_mw: float = 550.0,
     max_logp: float = 5.0,
@@ -52,7 +59,7 @@ def is_drug_like(
     max_hba: int = 10,
     max_rot_bonds: int = 10,
 ) -> bool:
-    metrics = drug_like_metrics(smiles)
+    metrics = drug_like_metrics_mol(mol)
     if metrics is None:
         return False
 
@@ -64,4 +71,31 @@ def is_drug_like(
             metrics.hba <= max_hba,
             metrics.rot_bonds <= max_rot_bonds,
         )
+    )
+
+
+def is_drug_like(
+    smiles: str,
+    min_mw: float = 0.0,
+    max_mw: float = 550.0,
+    max_logp: float = 5.0,
+    max_hbd: int = 5,
+    max_hba: int = 10,
+    max_rot_bonds: int = 10,
+) -> bool:
+    if Chem is None:
+        return False
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return False
+
+    return is_drug_like_mol(
+        mol,
+        min_mw=min_mw,
+        max_mw=max_mw,
+        max_logp=max_logp,
+        max_hbd=max_hbd,
+        max_hba=max_hba,
+        max_rot_bonds=max_rot_bonds,
     )

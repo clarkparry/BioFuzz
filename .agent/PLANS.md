@@ -6,6 +6,7 @@
 
 ## Completed
 
+- `2026-04-14_release_accuracy_and_speed_tuning.txt` — tuned the release hot path by deferring selectivity until after confirmation, preventing unconfirmed-hit `finds`, skipping duplicate seeds, reusing RDKit mols in preparation/mutation filtering, and dropping receptor hydrogens from coverage contacts.
 - `2026-04-13_tui_redraw_throttling_and_heartbeat_deduplication.txt` — made the TUI honor its redraw throttle for normal updates, disabled duplicate fuzzer-side heartbeats during TUI runs, and added regression coverage for redraw coalescing plus one-second timer continuity.
 - `2026-04-13_runtime_tui_hashed_coverage_and_union_removal.txt` — exposed bitmap occupancy/epoch/novelty counts in the TUI using existing runtime counters and removed the old union-only coverage bookkeeping from the live runtime path.
 - `2026-04-13_documentation_sync_for_hashed_coverage.txt` — updated the README and build-structure guide so the documented coverage model, scheduling flow, checkpoint format, and config schema match the implemented hashed fingerprint bitmap behavior.

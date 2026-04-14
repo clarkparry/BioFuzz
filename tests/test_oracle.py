@@ -121,6 +121,29 @@ def test_evaluate_skips_selectivity_when_redock_unavailable(monkeypatch) -> None
     assert "Selectivity skipped" in verdict.notes
 
 
+def test_evaluate_can_skip_selectivity_until_confirmation(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_selectivity(smiles: str, target: TargetConfig, **kwargs) -> float | None:
+        calls.append(smiles)
+        return 3.0
+
+    monkeypatch.setattr(affinity_oracle, "selectivity_ratio_from_target", fake_selectivity)
+
+    modes = [DockingMode(mode=1, affinity=-10.3, rmsd_lb=0.0, rmsd_ub=0.0)]
+    pose = "REMARK internal strain 0.9\n"
+    verdict = evaluate(
+        modes,
+        pose,
+        _target_with_offtarget(),
+        smiles="CCO",
+        check_selectivity=False,
+    )
+
+    assert verdict.is_hit
+    assert calls == []
+
+
 def test_selectivity_best_affinity_cleans_pose_file(monkeypatch, tmp_path) -> None:
     target = _target_with_offtarget()
     pose_path = tmp_path / "pose.pdbqt"

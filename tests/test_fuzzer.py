@@ -11,6 +11,7 @@ from biofuzz.core.coverage import CoverageMap, CoverageObservation
 from biofuzz.core.fuzzer import run
 from biofuzz.docking.config import BoxConfig, OracleConfig, PocketConfig, TargetConfig
 from biofuzz.docking.runner import DockingResult
+from biofuzz.oracle import selectivity as selectivity_oracle
 
 
 def _corpus_checkpoint(output_dir: Path) -> Path:
@@ -1104,6 +1105,7 @@ def test_run_counts_selectivity_docks_in_total_docks(
         )
 
     monkeypatch.setattr(fuzzer_module, "dock", fake_dock)
+    monkeypatch.setattr(selectivity_oracle, "dock", fake_dock)
 
     target = TargetConfig(
         name="mini",
@@ -1127,6 +1129,166 @@ def test_run_counts_selectivity_docks_in_total_docks(
 
     assert stats["iterations"] == 1
     assert stats["total_docks"] == 4
+
+
+def test_run_defers_selectivity_until_after_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+    offtarget = tmp_path / "offtarget.pdbqt"
+    offtarget.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    dock_calls: list[str] = []
+
+    def fake_dock(*args, **kwargs) -> DockingResult:
+        target = args[1]
+        target_name = getattr(target, "name", "direct")
+        dock_calls.append(target_name)
+        pose_path = output_dir / f"pose_{len(dock_calls)}.pdbqt"
+        pose_path.write_text(
+            "MODEL 1\n"
+            "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+            "ENDMDL\n",
+            encoding="utf-8",
+        )
+        affinity = -10.0 if target_name == "mini" else -3.0
+        return DockingResult(
+            success=True,
+            log_text=f"   1       {affinity:.1f}      0.000      0.000\n",
+            pose_path=str(pose_path),
+            error=None,
+        )
+
+    monkeypatch.setattr(fuzzer_module, "dock", fake_dock)
+    monkeypatch.setattr(selectivity_oracle, "dock", fake_dock)
+
+    target = TargetConfig(
+        name="mini",
+        receptor=str(receptor),
+        box=BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0),
+        pocket=PocketConfig(residue_ids={1, 2}, contact_cutoff=3.5),
+        oracle=OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5, selectivity_ratio_min=2.0),
+        offtarget_receptor=str(offtarget),
+        offtarget_box=BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0),
+    )
+
+    stats = run(
+        target_config=target,
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=1,
+        mutations_per_entry=1,
+        exhaustiveness_confirm=16,
+    )
+
+    assert stats["iterations"] == 1
+    assert stats["total_docks"] == 6
+    assert dock_calls == ["mini", "mini", "mini_offtarget", "mini", "mini", "mini_offtarget"]
+
+
+def test_run_does_not_mark_unconfirmed_hits_as_finds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+
+    monkeypatch.setattr(fuzzer_module, "load_smiles", lambda _path: [("CCO", "seed_1")])
+    monkeypatch.setattr(fuzzer_module, "mutate", lambda smiles, n=20, **kwargs: ["CCN"])
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+
+    dock_calls = {"count": 0}
+
+    def fake_dock(*args, **kwargs) -> DockingResult:
+        dock_calls["count"] += 1
+        pose_path = output_dir / f"pose_{dock_calls['count']}.pdbqt"
+        pose_path.write_text(
+            "MODEL 1\n"
+            "ATOM      1  C1  LIG A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+            "ENDMDL\n",
+            encoding="utf-8",
+        )
+        affinity = -7.0 if dock_calls["count"] == 4 else -10.0
+        return DockingResult(
+            success=True,
+            log_text=f"   1       {affinity:.1f}      0.000      0.000\n",
+            pose_path=str(pose_path),
+            error=None,
+        )
+
+    monkeypatch.setattr(fuzzer_module, "dock", fake_dock)
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=1,
+        workers=1,
+        mutations_per_entry=1,
+        exhaustiveness_confirm=16,
+    )
+
+    assert stats["iterations"] == 1
+    assert stats["hits"] == 1
+
+    corpus = Corpus()
+    corpus.load(_corpus_checkpoint(output_dir))
+    child_entry = next(entry for entry in corpus._entries.values() if entry.smiles == "CCN")
+    assert child_entry.finds == 0
+
+
+def test_run_skips_duplicate_seed_smiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receptor = tmp_path / "protein.pdbqt"
+    receptor.write_text(
+        "ATOM      1  N   MET A   1       0.0   0.0   0.0\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "run"
+
+    monkeypatch.setattr(
+        fuzzer_module,
+        "load_smiles",
+        lambda _path: [("CCO", "seed_1"), ("CCO", "seed_2"), ("CCN", "seed_3")],
+    )
+    monkeypatch.setattr(fuzzer_module, "prepare_smiles", lambda smiles, **kwargs: "PDBQT")
+    monkeypatch.setattr(fuzzer_module, "dock", _make_successful_dock(output_dir))
+
+    stats = run(
+        target_config=_target_config(receptor),
+        seed_smiles_path=tmp_path / "seeds.smi",
+        output_dir=output_dir,
+        max_iterations=0,
+        workers=1,
+    )
+
+    assert stats["iterations"] == 0
+    assert stats["total_docks"] == 2
+    assert stats["corpus_size"] == 2
 
 
 def test_run_terminates_worker_pool_and_saves_checkpoints_on_manual_quit(

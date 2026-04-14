@@ -32,3 +32,12 @@ def test_is_drug_like_respects_threshold_boundaries() -> None:
         "CCO",
         min_mw=metrics.molecular_weight + 0.1,
     )
+
+
+@pytest.mark.skipif(filters.Chem is None, reason="RDKit not installed")
+def test_is_drug_like_mol_matches_smiles_path() -> None:
+    mol = filters.Chem.MolFromSmiles("CCO")
+    assert mol is not None
+
+    assert filters.drug_like_metrics_mol(mol) == filters.drug_like_metrics("CCO")
+    assert filters.is_drug_like_mol(mol) is filters.is_drug_like("CCO")

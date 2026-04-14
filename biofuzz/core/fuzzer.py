@@ -36,6 +36,10 @@ POOL_ABORT_JOIN_TIMEOUT_SECONDS = 2.0
 POOL_ABORT_JOIN_GRACE_SECONDS = 0.5
 
 
+def _confirmation_requested(exhaustiveness_confirm: int | None) -> bool:
+    return exhaustiveness_confirm is not None and exhaustiveness_confirm > 0
+
+
 def load_smiles(seed_smiles_path: str | Path) -> list[tuple[str, str]]:
     entries: list[tuple[str, str]] = []
     with Path(seed_smiles_path).open("r", encoding="utf-8") as fh:
@@ -463,7 +467,9 @@ def run(
         current_stage = oracle_stage
         emit_progress()
 
-        verdict = evaluate(
+        confirmation_requested = _confirmation_requested(exhaustiveness_confirm)
+
+        preliminary_verdict = evaluate(
             modes,
             pose_text,
             target_config,
@@ -473,16 +479,23 @@ def run(
             num_modes=num_modes,
             docking_engine=engine,
             dock_observer=observe_extra_dock,
+            check_selectivity=not confirmation_requested,
         )
 
-        if not verdict.is_hit:
-            return verdict
+        if not preliminary_verdict.is_hit:
+            return preliminary_verdict
 
-        confirmed_verdict = verdict
+        confirmed_verdict = preliminary_verdict
         confirmed_affinity = initial_affinity
         confirmed_pose_path = initial_pose_path
 
-        if exhaustiveness_confirm is not None and exhaustiveness_confirm > 0:
+        if confirmation_requested:
+            confirmed_verdict = preliminary_verdict.__class__(
+                is_hit=False,
+                affinity=initial_affinity,
+                passed_tiers=list(preliminary_verdict.passed_tiers),
+                notes="Confirmation docking did not reproduce the preliminary target hit",
+            )
             record_dock_attempts()
             current_stage = confirm_stage
             emit_progress()
@@ -512,8 +525,10 @@ def run(
                                 num_modes=num_modes,
                                 docking_engine=engine,
                                 dock_observer=observe_extra_dock,
+                                check_selectivity=True,
                             )
-                            confirmed_pose_path = confirm_result.pose_path
+                            if confirmed_verdict.is_hit:
+                                confirmed_pose_path = confirm_result.pose_path
             finally:
                 if confirmed_pose_path != confirm_result.pose_path:
                     _cleanup_pose_path(confirm_result.pose_path)
@@ -535,7 +550,7 @@ def run(
         elif confirmed_pose_path and confirmed_pose_path != initial_pose_path:
             _cleanup_pose_path(confirmed_pose_path)
 
-        return verdict
+        return confirmed_verdict
 
     def is_pool_pipe_error(exc: BaseException) -> bool:
         if isinstance(exc, (BrokenPipeError, EOFError, ConnectionResetError)):
@@ -670,10 +685,12 @@ def run(
             seed_parse_failed = 0
             seed_non_interesting = 0
             seed_fallback_added = 0
+            seed_duplicates_skipped = 0
             seed_attempted = 0
             seed_completed = 0
             seed_successful_candidates: list[tuple[float, str, str, int, int]] = []
             interesting_smiles: set[str] = set()
+            seen_seed_smiles: set[str] = set()
             seed_pending: list[tuple[str, str, str]] = []
             seed_dock_batch_size = max(1, workers * SEED_DOCK_BATCH_MULTIPLIER)
 
@@ -741,7 +758,6 @@ def run(
                             affinity,
                             smiles,
                             source_id,
-                            0,
                             observation.novelty_score,
                             1 if verdict.is_hit else 0,
                         )
@@ -845,6 +861,10 @@ def run(
                 if abort_requested:
                     raise KeyboardInterrupt
                 seed_total += 1
+                if smiles in seen_seed_smiles:
+                    seed_duplicates_skipped += 1
+                    continue
+                seen_seed_smiles.add(smiles)
                 current_stage = "seed_prepare"
                 current_parent = source_id
                 current_smiles = smiles
@@ -901,7 +921,6 @@ def run(
                     affinity,
                     smiles,
                     source_id,
-                    new_bits_count,
                     novelty_score,
                     finds_count,
                 ) in sorted(
@@ -941,7 +960,7 @@ def run(
             log(
                 "[SEED] completed seed docking: total={} attempted={} completed={} "
                 "interesting={} fallback_added={} prepare_failed={} prepare_relaxed={} "
-                "dock_failed={} parse_failed={} non_interesting={} corpus={}"
+                "dock_failed={} parse_failed={} non_interesting={} duplicates_skipped={} corpus={}"
                 .format(
                     seed_total,
                     seed_attempted,
@@ -953,6 +972,7 @@ def run(
                     seed_dock_failed,
                     seed_parse_failed,
                     seed_non_interesting,
+                    seed_duplicates_skipped,
                     corpus.size(),
                 )
             )

@@ -1084,3 +1084,21 @@ Validation performed:
 ## Future Work
 
 The next useful improvement would be reducing progress-callback churn itself in places where the fuzzer emits many intermediate state transitions that humans do not meaningfully distinguish. The main challenge is preserving the most informative stage transitions for operators and tests while collapsing the low-signal ones enough to keep the live view responsive and simple.
+
+## Phase Summary: Release Accuracy And Speed Tuning
+
+This phase focused on first-release polish rather than architectural expansion: tighten any fuzzy accuracy mistakes that were cheap to fix, remove redundant hot-path work, and verify the whole docking loop still behaves correctly. The most important issue was in the oracle path. BioFuzz could evaluate selectivity before confirmation docking and then return that preliminary verdict to corpus scoring, which meant off-target docks could happen twice and unconfirmed hits could still increase a molecule's `finds` bonus.
+
+The successful approach was to keep every change narrow and measurable. `biofuzz/core/fuzzer.py` now treats confirmation as the gate before expensive selectivity when confirmation is enabled, and only the confirmed verdict flows back into findings persistence and corpus scoring. In parallel, the chemistry hot path stopped reparsing the same SMILES repeatedly by reusing existing RDKit mol objects in `filters.py`, `preparation.py`, and `mutator.py`; seed bootstrap now skips exact duplicate SMILES before docking; and receptor hydrogens are removed from residue-contact parsing so coverage fingerprints stay closer to the intended heavy-atom contact model while doing less inner-loop work.
+
+The main challenge was keeping the fixes genuinely release-safe. Many possible improvements existed, but most would have widened the compatibility surface or changed campaign semantics too much. I therefore left the largest remaining accuracy limitation untouched: coverage is still chain-insensitive, so multimeric targets can alias residues that share a sequence number across chains. Fixing that would require a broader checkpoint/config migration and should be handled as a separate phase.
+
+Validation performed:
+
+- `./.venv/bin/python -m pytest -q` -> `120 passed`
+- `./.venv/bin/python .agent/tools/runtime_audit.py` -> `live_run_ready: True`
+- Direct bounded live run via `run(... max_iterations=1, workers=2, engine='vina')` on a 1-seed HIV protease smoke corpus -> completed successfully with `iterations=1`, `hits=0`, `corpus_size=2`, `total_docks=3`, and `completed_docks=3`
+
+## Future Work
+
+The next meaningful accuracy improvement is making coverage residue identifiers chain-aware instead of using bare residue numbers. That would prevent aliasing on multimeric targets and make fingerprint novelty more faithful, but the challenge is that the fix touches target configs, coverage checkpoint compatibility, and every test or persistence path that currently assumes `set[int]` residue IDs.
