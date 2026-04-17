@@ -14,6 +14,12 @@ from biofuzz.core.coverage import (
     normalize_novelty_weights,
     validate_coverage_settings,
 )
+from biofuzz.protein.residue_keys import (
+    is_qualified_residue_key,
+    normalize_residue_keys,
+    residue_number,
+    sort_residue_keys,
+)
 
 try:
     import yaml
@@ -32,6 +38,7 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
         "affinity_threshold": -9.0,
         "strain_threshold": 3.5,
         "selectivity_ratio_min": 2.0,
+        "selectivity_policy": "fail_open",
     },
     "molecules": {
         "max_mw": 550,
@@ -67,8 +74,20 @@ ORACLE_FIELD_NAMES = (
     "affinity_threshold",
     "strain_threshold",
     "selectivity_ratio_min",
+    "selectivity_policy",
 )
 _ORACLE_UNSET = object()
+SELECTIVITY_POLICIES = {"fail_open", "fail_closed"}
+
+
+def normalize_selectivity_policy(value: str | object = _ORACLE_UNSET) -> str:
+    normalized = "fail_open" if value is _ORACLE_UNSET else str(value).strip().lower()
+    if normalized not in SELECTIVITY_POLICIES:
+        raise ValueError(
+            "selectivity_policy must be one of "
+            f"{', '.join(sorted(SELECTIVITY_POLICIES))}"
+        )
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -83,7 +102,7 @@ class BoxConfig:
 
 @dataclass(frozen=True)
 class PocketConfig:
-    residue_ids: set[int] = field(default_factory=set)
+    residue_ids: set[str] = field(default_factory=set)
     contact_cutoff: float = 3.5
 
 
@@ -92,6 +111,7 @@ class OracleConfig:
     affinity_threshold: float = -9.0
     strain_threshold: float = 3.5
     selectivity_ratio_min: float = 2.0
+    selectivity_policy: str = "fail_open"
     _explicit_fields: frozenset[str] = field(default_factory=frozenset, repr=False, compare=False)
 
     def __init__(
@@ -99,6 +119,7 @@ class OracleConfig:
         affinity_threshold: float | object = _ORACLE_UNSET,
         strain_threshold: float | object = _ORACLE_UNSET,
         selectivity_ratio_min: float | object = _ORACLE_UNSET,
+        selectivity_policy: str | object = _ORACLE_UNSET,
         _explicit_fields: Iterable[str] | None = None,
     ) -> None:
         explicit_fields = (
@@ -108,6 +129,7 @@ class OracleConfig:
                     ("affinity_threshold", affinity_threshold),
                     ("strain_threshold", strain_threshold),
                     ("selectivity_ratio_min", selectivity_ratio_min),
+                    ("selectivity_policy", selectivity_policy),
                 )
                 if value is not _ORACLE_UNSET
             }
@@ -128,6 +150,11 @@ class OracleConfig:
             self,
             "selectivity_ratio_min",
             2.0 if selectivity_ratio_min is _ORACLE_UNSET else float(selectivity_ratio_min),
+        )
+        object.__setattr__(
+            self,
+            "selectivity_policy",
+            normalize_selectivity_policy(selectivity_policy),
         )
         object.__setattr__(self, "_explicit_fields", frozenset(explicit_fields))
 
@@ -234,7 +261,7 @@ def _to_box_config(value: BoxConfig | Mapping[str, Any]) -> BoxConfig:
 def _to_pocket_config(value: PocketConfig | Mapping[str, Any]) -> PocketConfig:
     if isinstance(value, PocketConfig):
         return value
-    residue_ids = {int(rid) for rid in value.get("residue_ids", set())}
+    residue_ids = normalize_residue_keys(value.get("residue_ids", set()))
     return PocketConfig(
         residue_ids=residue_ids,
         contact_cutoff=float(value.get("contact_cutoff", 3.5)),
@@ -259,6 +286,7 @@ def _to_oracle_config(value: OracleConfig | Mapping[str, Any] | None) -> OracleC
         affinity_threshold=float(value.get("affinity_threshold", -9.0)),
         strain_threshold=float(value.get("strain_threshold", 3.5)),
         selectivity_ratio_min=float(value.get("selectivity_ratio_min", 2.0)),
+        selectivity_policy=normalize_selectivity_policy(value.get("selectivity_policy", "fail_open")),
         _explicit_fields=explicit_fields,
     )
 
@@ -270,7 +298,7 @@ def merge_oracle_defaults(
     target_cfg = _to_oracle_config(target_oracle)
     global_cfg = _to_oracle_config(global_oracle)
 
-    merged: dict[str, float] = {}
+    merged: dict[str, float | str] = {}
     for name in ORACLE_FIELD_NAMES:
         if name in target_cfg._explicit_fields:
             merged[name] = getattr(target_cfg, name)
@@ -400,11 +428,37 @@ def load_target_config(
                 else offtarget
             )
 
+    pocket = config.pocket
+    if receptor.exists() and any(
+        not is_qualified_residue_key(residue_id) for residue_id in pocket.residue_ids
+    ):
+        from biofuzz.protein.residues import load_residue_coordinates
+
+        receptor_residue_ids = set(load_residue_coordinates(receptor))
+        qualified_residue_ids: set[str] = set()
+        for residue_id in pocket.residue_ids:
+            if is_qualified_residue_key(residue_id):
+                qualified_residue_ids.add(residue_id)
+                continue
+            matches = [
+                candidate
+                for candidate in receptor_residue_ids
+                if residue_number(candidate) == residue_number(residue_id)
+            ]
+            if matches:
+                qualified_residue_ids.update(sort_residue_keys(matches))
+            else:
+                qualified_residue_ids.add(str(residue_id))
+        pocket = PocketConfig(
+            residue_ids=qualified_residue_ids,
+            contact_cutoff=config.pocket.contact_cutoff,
+        )
+
     normalized = TargetConfig(
         name=config.name,
         receptor=str(receptor),
         box=config.box,
-        pocket=config.pocket,
+        pocket=pocket,
         oracle=config.oracle,
         offtarget_receptor=str(offtarget) if offtarget else None,
         offtarget_box=config.offtarget_box,

@@ -218,8 +218,18 @@ Validation performed:
 - `git branch --show-current` -> `develop`
 - `pytest -q` -> `39 passed, 10 skipped`
 - `python3 main.py --target hiv_protease --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_03_30_request_build_live` -> successful completion with `iterations=0`, `hits=0`, `coverage_ratio=0.0`, `corpus_size=6`, `best_affinity=0.0`
-- Inventory audit -> confirmed `targets/hiv_protease/{config.py,protein.pdbqt,reference_ligands/indinavir.smi,reference_ligands/indinavir.pdbqt}` and `scripts/{download_zinc.py,prep_protein.sh,visualize_hit.py}` are present
-- Dependency audit -> `yaml` available; `rdkit`, `meeko`, `gnina`, `vina`, `quickvina2`, and `quickvina-w` unavailable in the current workspace
+
+## Phase Summary: Chain-Aware Coverage And Explicit Selectivity Status
+
+This phase resolved the two remaining accuracy issues recorded in `TODO.md`: residue-contact coverage is now chain-aware, and selectivity outcomes are now explicit and policy-driven instead of being hidden behind a single pass/fail boolean. The implementation introduced a normalized residue-key layer so parsed receptor residues, target pocket configs, computed fingerprints, stable coverage bit mappings, and saved checkpoints all speak the same chain-qualified ID format (`A:42`, `B:42`, and so on). That removed the multimer aliasing problem in oligomeric pockets while keeping resume safety intact by migrating only unambiguous legacy checkpoints and refusing ambiguous ones.
+
+The other half of the phase tightened oracle semantics. `OracleConfig` now exposes `selectivity_policy` (`fail_open` vs `fail_closed`), oracle verdict metadata now records `selectivity_status`, and run/CLI summaries now expose counters for `passed`, `failed`, `skipped_unavailable`, and `not_configured`. The main challenge was threading both schema changes through a codebase that already had checkpoint compatibility, checked-in target fixtures, and a large regression suite. The solution stayed narrow: a small residue-key module, a versioned checkpoint migration path, targeted target-config/tooling updates, and focused regression tests rather than a larger architecture rewrite.
+
+Validation performed:
+
+- `./.venv/bin/python -m pytest tests/test_coverage.py tests/test_oracle.py tests/test_config.py tests/test_fuzzer.py tests/test_main.py -q` -> `77 passed`
+- `./.venv/bin/python -m pytest -q` -> `124 passed`
+- `./.venv/bin/python main.py --target hiv_protease --seeds runs/smoke_cli_2026_04_14_chain_selectivity_seed.smi --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_04_14_chain_selectivity` -> successful CLI smoke run with chain-aware HIV pocket config and selectivity summary counters
 
 ## Phase Summary: Preflight Binary Alignment
 

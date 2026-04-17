@@ -4,6 +4,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import DefaultDict
 
+from biofuzz.protein.residue_keys import residue_key
+
 
 def _is_hydrogen_atom(atom_name: str, atom_type: str) -> bool:
     normalized_name = atom_name.strip().upper()
@@ -11,8 +13,8 @@ def _is_hydrogen_atom(atom_name: str, atom_type: str) -> bool:
     return normalized_name.startswith("H") or normalized_type.startswith("H")
 
 
-def parse_protein_residues(pdbqt_text: str) -> dict[int, list[tuple[float, float, float]]]:
-    residues: DefaultDict[int, list[tuple[float, float, float]]] = defaultdict(list)
+def parse_protein_residues(pdbqt_text: str) -> dict[str, list[tuple[float, float, float]]]:
+    residues: DefaultDict[str, list[tuple[float, float, float]]] = defaultdict(list)
 
     for line in pdbqt_text.splitlines():
         if not (line.startswith("ATOM") or line.startswith("HETATM")):
@@ -22,6 +24,7 @@ def parse_protein_residues(pdbqt_text: str) -> dict[int, list[tuple[float, float
         atom_type = line[77:].strip()
         try:
             residue_id = int(line[22:26].strip())
+            chain_id = line[21].strip()
             x = float(line[30:38])
             y = float(line[38:46])
             z = float(line[46:54])
@@ -31,6 +34,7 @@ def parse_protein_residues(pdbqt_text: str) -> dict[int, list[tuple[float, float
                 continue
             try:
                 atom_name = parts[2]
+                chain_id = parts[4]
                 residue_id = int(parts[5])
                 x = float(parts[6])
                 y = float(parts[7])
@@ -42,11 +46,11 @@ def parse_protein_residues(pdbqt_text: str) -> dict[int, list[tuple[float, float
         if _is_hydrogen_atom(atom_name, atom_type):
             continue
 
-        residues[residue_id].append((x, y, z))
+        residues[residue_key(chain_id, residue_id)].append((x, y, z))
 
     return dict(residues)
 
 
-def load_residue_coordinates(path: str | Path) -> dict[int, list[tuple[float, float, float]]]:
+def load_residue_coordinates(path: str | Path) -> dict[str, list[tuple[float, float, float]]]:
     text = Path(path).read_text(encoding="utf-8")
     return parse_protein_residues(text)

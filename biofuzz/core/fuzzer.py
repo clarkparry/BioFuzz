@@ -12,7 +12,7 @@ import traceback
 from typing import Any, Callable, Mapping
 
 from biofuzz.core.corpus import Corpus, CorpusEntry
-from biofuzz.core.coverage import CoverageMap
+from biofuzz.core.coverage import CoverageMap, checkpoint_pocket_residue_ids
 from biofuzz.core.tui import RuntimeStatus
 from biofuzz.docking.config import TargetConfig, normalize_coverage_config
 from biofuzz.docking.parser import parse_log, parse_pose
@@ -230,9 +230,12 @@ def _cleanup_pose_path(pose_path: str | None) -> None:
         Path(pose_path).unlink(missing_ok=True)
 
 
-def _load_saved_pocket_residue_ids(path: Path) -> set[int]:
+def _load_saved_pocket_residue_ids(
+    path: Path,
+    current_pocket_residue_ids: set[str] | None = None,
+) -> set[str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return {int(value) for value in payload.get("pocket_residue_ids", [])}
+    return checkpoint_pocket_residue_ids(payload, current_pocket_residue_ids)
 
 
 def _corpus_checkpoint_paths(output_dir: Path) -> tuple[Path, Path]:
@@ -450,6 +453,10 @@ def run(
         record_dock_completion(result)
         emit_progress()
 
+    def record_selectivity_status(status: str) -> None:
+        if status in selectivity_counts:
+            selectivity_counts[status] += 1
+
     def evaluate_and_process_hit(
         *,
         smiles: str,
@@ -483,6 +490,7 @@ def run(
         )
 
         if not preliminary_verdict.is_hit:
+            record_selectivity_status(preliminary_verdict.selectivity_status)
             return preliminary_verdict
 
         confirmed_verdict = preliminary_verdict
@@ -494,6 +502,7 @@ def run(
                 is_hit=False,
                 affinity=initial_affinity,
                 passed_tiers=list(preliminary_verdict.passed_tiers),
+                selectivity_status=preliminary_verdict.selectivity_status,
                 notes="Confirmation docking did not reproduce the preliminary target hit",
             )
             record_dock_attempts()
@@ -550,6 +559,7 @@ def run(
         elif confirmed_pose_path and confirmed_pose_path != initial_pose_path:
             _cleanup_pose_path(confirmed_pose_path)
 
+        record_selectivity_status(confirmed_verdict.selectivity_status)
         return confirmed_verdict
 
     def is_pool_pipe_error(exc: BaseException) -> bool:
@@ -591,7 +601,10 @@ def run(
 
     if coverage_checkpoint.exists():
         try:
-            saved_pocket_ids = _load_saved_pocket_residue_ids(coverage_checkpoint)
+            saved_pocket_ids = _load_saved_pocket_residue_ids(
+                coverage_checkpoint,
+                cov_map.pocket_residue_ids,
+            )
             if saved_pocket_ids != cov_map.pocket_residue_ids:
                 log(
                     "[WARN] skipping coverage checkpoint {} because pocket residues differ"
@@ -627,6 +640,12 @@ def run(
     best_affinity: float | None = None
     stopped_reason = "completed"
     failure_reason: str | None = None
+    selectivity_counts = {
+        "passed": 0,
+        "failed": 0,
+        "skipped_unavailable": 0,
+        "not_configured": 0,
+    }
     selectivity_exhaustiveness = max(
         8,
         exhaustiveness_confirm if exhaustiveness_confirm is not None else exhaustiveness,
@@ -1311,6 +1330,18 @@ def run(
         "stopped_reason": stopped_reason,
     }
     stats.update(cov_map.stats())
+    stats.update(
+        {
+            "selectivity_passed_count": selectivity_counts["passed"],
+            "selectivity_failed_count": selectivity_counts["failed"],
+            "selectivity_skipped_unavailable_count": selectivity_counts[
+                "skipped_unavailable"
+            ],
+            "selectivity_not_configured_count": selectivity_counts[
+                "not_configured"
+            ],
+        }
+    )
     if failure_reason is not None:
         stats["failure_reason"] = failure_reason
     return stats

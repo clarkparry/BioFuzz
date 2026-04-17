@@ -16,6 +16,7 @@ class OracleVerdict:
     is_hit: bool
     affinity: float
     passed_tiers: list[str]
+    selectivity_status: str
     notes: str
 
 
@@ -62,15 +63,19 @@ def evaluate(
         notes.append(f"Strain exceeded threshold {oracle_cfg.strain_threshold:.2f}")
 
     selectivity_ok = True
+    selectivity_status = "not_configured"
+    selectivity_configured = (
+        isinstance(config, TargetConfig)
+        and bool(config.offtarget_receptor)
+        and config.offtarget_box is not None
+    )
     # Selectivity is expensive and only meaningful once affinity has already passed.
     if (
         check_selectivity
         and
         affinity_ok
-        and isinstance(config, TargetConfig)
+        and selectivity_configured
         and smiles
-        and config.offtarget_receptor
-        and config.offtarget_box
     ):
         ratio = selectivity_ratio_from_target(
             smiles,
@@ -83,10 +88,20 @@ def evaluate(
             dock_observer=dock_observer,
         )
         if ratio is None:
-            notes.append("Selectivity skipped: target/off-target docking unavailable")
+            selectivity_status = "skipped_unavailable"
+            if oracle_cfg.selectivity_policy == "fail_closed":
+                selectivity_ok = False
+                notes.append(
+                    "Selectivity skipped: target/off-target docking unavailable "
+                    "(required by fail_closed policy)"
+                )
+            else:
+                notes.append("Selectivity skipped: target/off-target docking unavailable")
         elif ratio >= oracle_cfg.selectivity_ratio_min:
+            selectivity_status = "passed"
             passed_tiers.append("selectivity")
         else:
+            selectivity_status = "failed"
             selectivity_ok = False
             notes.append(
                 "Selectivity ratio below threshold "
@@ -99,5 +114,6 @@ def evaluate(
         is_hit=is_hit,
         affinity=affinity,
         passed_tiers=passed_tiers,
+        selectivity_status=selectivity_status,
         notes="; ".join(notes) if notes else "passed",
     )

@@ -4,6 +4,7 @@ from typing import Iterable, Mapping, Sequence
 
 from biofuzz.docking.config import PocketConfig
 from biofuzz.docking.parser import PoseAtom
+from biofuzz.protein.residue_keys import normalize_residue_keys
 
 
 def _distance_sq(
@@ -24,22 +25,22 @@ def _is_hydrogen(atom: PoseAtom) -> bool:
 
 def compute_fingerprint(
     pose_atoms: Sequence[PoseAtom],
-    protein_residues: Mapping[int, Sequence[tuple[float, float, float]]],
-    pocket: PocketConfig | Iterable[int],
+    protein_residues: Mapping[str, Sequence[tuple[float, float, float]]],
+    pocket: PocketConfig | Iterable[str | int],
     contact_cutoff: float | None = None,
-) -> frozenset[int]:
+) -> frozenset[str]:
     if isinstance(pocket, PocketConfig):
         residue_ids = pocket.residue_ids
         cutoff = contact_cutoff if contact_cutoff is not None else pocket.contact_cutoff
     else:
-        residue_ids = {int(rid) for rid in pocket}
+        residue_ids = normalize_residue_keys(pocket)
         cutoff = 3.5 if contact_cutoff is None else float(contact_cutoff)
 
     if not pose_atoms:
         return frozenset()
 
     cutoff_sq = cutoff * cutoff
-    contacted: set[int] = set()
+    contacted: set[str] = set()
 
     atom_coords = [
         (atom.x, atom.y, atom.z)

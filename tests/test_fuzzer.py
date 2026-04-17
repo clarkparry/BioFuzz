@@ -30,7 +30,7 @@ def _target_config(receptor: Path) -> TargetConfig:
             size_y=10.0,
             size_z=10.0,
         ),
-        pocket=PocketConfig(residue_ids={1, 2}, contact_cutoff=3.5),
+        pocket=PocketConfig(residue_ids={"A:1", "A:2"}, contact_cutoff=3.5),
         oracle=OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5),
     )
 
@@ -178,7 +178,7 @@ def test_run_treats_hashed_seed_novelty_as_interesting_even_without_new_union_bi
 
     class FakeCoverageMap:
         def __init__(self, pocket_residue_ids, **kwargs) -> None:
-            self.pocket_residue_ids = {int(value) for value in pocket_residue_ids}
+            self.pocket_residue_ids = set(pocket_residue_ids)
             self.epoch = 0
             self.strong_novelty_count = 0
             self.weak_novelty_count = 0
@@ -1111,7 +1111,7 @@ def test_run_counts_selectivity_docks_in_total_docks(
         name="mini",
         receptor=str(receptor),
         box=BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0),
-        pocket=PocketConfig(residue_ids={1, 2}, contact_cutoff=3.5),
+        pocket=PocketConfig(residue_ids={"A:1", "A:2"}, contact_cutoff=3.5),
         oracle=OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5, selectivity_ratio_min=2.0),
         offtarget_receptor=str(offtarget),
         offtarget_box=BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0),
@@ -1129,6 +1129,8 @@ def test_run_counts_selectivity_docks_in_total_docks(
 
     assert stats["iterations"] == 1
     assert stats["total_docks"] == 4
+    assert stats["selectivity_passed_count"] == 2
+    assert stats["selectivity_failed_count"] == 0
 
 
 def test_run_defers_selectivity_until_after_confirmation(
@@ -1181,7 +1183,7 @@ def test_run_defers_selectivity_until_after_confirmation(
         name="mini",
         receptor=str(receptor),
         box=BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0),
-        pocket=PocketConfig(residue_ids={1, 2}, contact_cutoff=3.5),
+        pocket=PocketConfig(residue_ids={"A:1", "A:2"}, contact_cutoff=3.5),
         oracle=OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5, selectivity_ratio_min=2.0),
         offtarget_receptor=str(offtarget),
         offtarget_box=BoxConfig(center_x=0.0, center_y=0.0, center_z=0.0, size_x=10.0, size_y=10.0, size_z=10.0),
@@ -1199,6 +1201,7 @@ def test_run_defers_selectivity_until_after_confirmation(
 
     assert stats["iterations"] == 1
     assert stats["total_docks"] == 6
+    assert stats["selectivity_passed_count"] == 2
     assert dock_calls == ["mini", "mini", "mini_offtarget", "mini", "mini", "mini_offtarget"]
 
 

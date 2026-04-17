@@ -161,3 +161,13 @@
 - Tightened coverage contact extraction by skipping receptor hydrogens during residue parsing. This removes some false-positive residue contacts and reduces distance checks without changing the overall coverage model.
 - Major remaining finding: coverage is still chain-insensitive. Pocket residues are keyed only by residue number, so multimeric targets can alias contacts like `A:42` and `B:42`. I did not change this in the release pass because it would require a cross-cutting checkpoint/config migration, but it is the main remaining accuracy limitation.
 - Secondary limitation to keep in mind: if selectivity docking is unavailable, the oracle still treats the hit as passable and records a `Selectivity skipped` note. That fail-open behavior is useful for robustness, but it means hit quality should be interpreted accordingly when off-target infrastructure is missing.
+
+## 2026-04-14 - Chain-aware coverage and explicit selectivity outcomes
+
+- Coverage now uses chain-qualified residue IDs end-to-end (`A:42`, `B:42`, etc.) via the new `biofuzz/protein/residue_keys.py` helper, so multimeric contacts no longer alias in fingerprints, stable residue-to-bit mappings, or hashed checkpoint metadata.
+- Coverage checkpoints were versioned to schema `3`. Older residue-number-only checkpoints still migrate automatically for unambiguous single-chain pockets, but ambiguous multimeric checkpoints are now rejected safely instead of being applied with lossy chain collapse.
+- The checked-in target configs now store chain-qualified pocket residue IDs, and `.agent/tools/prepare_target_fixture.py` was updated to emit the same format for newly generated fixtures.
+- HIV protease now tracks both monomers explicitly in its pocket definition (`A:*` and `B:*` residues), which restores novelty signal across chain-specific binding modes.
+- `OracleConfig` gained `selectivity_policy` with `fail_open` and `fail_closed` modes. The default in `config.yaml` remains `fail_open` to preserve robustness unless the user explicitly wants stricter gating.
+- Oracle verdict metadata now includes `selectivity_status` with one of `passed`, `failed`, `skipped_unavailable`, or `not_configured`, and run/CLI summaries now report aggregate counters for those outcomes.
+- Regression coverage was added for chain-distinct residue fingerprints/bits, legacy checkpoint migration safety, target-config pocket qualification, fail-closed selectivity behavior, and selectivity summary counters.

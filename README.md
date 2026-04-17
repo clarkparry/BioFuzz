@@ -203,7 +203,7 @@ Coverage in BioFuzz is now a **hashed fingerprint bitmap** used for seed triage,
 1. Define the active site residues. For a typical small-molecule binding pocket, this is ~15–30 residues. These are identified once, manually, by inspecting the protein structure in PyMOL or ChimeraX.
 2. After each docking run, parse the output pose. For every heavy atom of the ligand, compute distances to every residue of the defined pocket.
 3. A residue is considered "contacted" if any of its atoms are within **3.5 Å** of any ligand heavy atom.
-4. Build the residue contact fingerprint as a `frozenset[int]` of contacted pocket residue IDs.
+4. Build the residue contact fingerprint as a `frozenset[str]` of contacted pocket residue IDs such as `"A:42"`.
 5. Map pocket residues into a stable local bit order once per target, then convert each fingerprint into an exact integer bitmask.
 6. Hash that bitmask into a fixed-size bitmap index using a deterministic 64-bit mixing step.
 7. Classify novelty against a windowed epoch bitmap:
@@ -228,7 +228,7 @@ That `novelty_score` is now the primary coverage term used by the scheduler. The
 
 - current and previous novelty bitmaps
 - epoch and current occupancy count
-- pocket residue IDs and their stable local bit mapping
+- chain-qualified pocket residue IDs and their stable local bit mapping
 - novelty counters
 
 Legacy union-only checkpoints are still accepted on load and upgraded in memory to the new model.
@@ -417,7 +417,7 @@ pdbqt_string = preparator.write_pdbqt_string()
 
 ### ADFRsuite
 **Role**: Protein preparation for docking.  
-BioFuzz now ships `.agent/tools/prepare_target_fixture.py`, which downloads co-crystal structures, strips the chosen receptor chain, derives a docking box from the bound ligand, computes pocket residues, and then uses Meeko's `mk_prepare_receptor.py` to emit the checked-in receptor PDBQT.  
+BioFuzz now ships `.agent/tools/prepare_target_fixture.py`, which downloads co-crystal structures, strips the chosen receptor chain, derives a docking box from the bound ligand, computes chain-qualified pocket residues, and then uses Meeko's `mk_prepare_receptor.py` to emit the checked-in receptor PDBQT.  
 
 ```bash
 .venv/bin/python .agent/tools/prepare_target_fixture.py egfr_kinase parp1
@@ -432,7 +432,7 @@ BioFuzz now ships `.agent/tools/prepare_target_fixture.py`, which downloads co-c
 1. Download protein structure from RCSB PDB.
 2. Open in PyMOL. Identify the active site. Note the coordinates of the binding pocket center (x, y, z) and estimate the box dimensions.
 3. Prepare protein: `prepare_receptor4.py -r protein.pdb -o protein.pdbqt`
-4. Define the pocket residues for coverage tracking (all residues within 6Å of the known active site center).
+4. Define the pocket residues for coverage tracking as chain-qualified IDs (for example `A:42`) covering all residues within 6Å of the known active site center.
 5. Download ZINC20 seed subset (10,000–100,000 SMILES) as the initial corpus.
 6. (Optional) Define off-target protein for selectivity oracle — prepare it the same way.
 

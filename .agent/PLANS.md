@@ -6,6 +6,7 @@
 
 ## Completed
 
+- `2026-04-14_chain_aware_coverage_and_selectivity_policy.txt` — implemented chain-aware residue coverage IDs, versioned checkpoint migration, explicit selectivity status/policy handling, updated target fixtures/configs, and added regression coverage for the TODO.md accuracy gaps.
 - `2026-04-14_release_accuracy_and_speed_tuning.txt` — tuned the release hot path by deferring selectivity until after confirmation, preventing unconfirmed-hit `finds`, skipping duplicate seeds, reusing RDKit mols in preparation/mutation filtering, and dropping receptor hydrogens from coverage contacts.
 - `2026-04-13_tui_redraw_throttling_and_heartbeat_deduplication.txt` — made the TUI honor its redraw throttle for normal updates, disabled duplicate fuzzer-side heartbeats during TUI runs, and added regression coverage for redraw coalescing plus one-second timer continuity.
 - `2026-04-13_runtime_tui_hashed_coverage_and_union_removal.txt` — exposed bitmap occupancy/epoch/novelty counts in the TUI using existing runtime counters and removed the old union-only coverage bookkeeping from the live runtime path.

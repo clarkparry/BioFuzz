@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from biofuzz.molecules.preparation import prepare_smiles
+from biofuzz.protein.residue_keys import residue_key
 
 
 @dataclass(frozen=True)
@@ -85,9 +86,13 @@ def parse_ligand_smiles(ligand_cif: Path) -> str:
     raise ValueError(f"Could not find canonical SMILES in {ligand_cif}")
 
 
-def parse_structure(pdb_path: Path, protein_chain: str, ligand_code: str) -> tuple[list[str], list[tuple[int, float, float, float]], list[tuple[float, float, float]]]:
+def parse_structure(
+    pdb_path: Path,
+    protein_chain: str,
+    ligand_code: str,
+) -> tuple[list[str], list[tuple[str, int, float, float, float]], list[tuple[float, float, float]]]:
     receptor_lines: list[str] = []
-    receptor_atoms: list[tuple[int, float, float, float]] = []
+    receptor_atoms: list[tuple[str, int, float, float, float]] = []
     ligand_atoms: list[tuple[float, float, float]] = []
 
     for raw_line in pdb_path.read_text(encoding="utf-8").splitlines():
@@ -109,7 +114,7 @@ def parse_structure(pdb_path: Path, protein_chain: str, ligand_code: str) -> tup
         if raw_line.startswith("ATOM  "):
             receptor_lines.append(raw_line)
             if element != "H":
-                receptor_atoms.append((int(raw_line[22:26]), x, y, z))
+                receptor_atoms.append((chain_id, int(raw_line[22:26]), x, y, z))
         elif resname == ligand_code and element != "H":
             ligand_atoms.append((x, y, z))
 
@@ -140,19 +145,25 @@ def compute_box(ligand_atoms: list[tuple[float, float, float]]) -> tuple[tuple[f
 
 
 def compute_pocket_residues(
-    receptor_atoms: list[tuple[int, float, float, float]],
+    receptor_atoms: list[tuple[str, int, float, float, float]],
     ligand_atoms: list[tuple[float, float, float]],
     cutoff: float = 4.5,
-) -> list[int]:
+) -> list[str]:
     cutoff_sq = cutoff * cutoff
-    residues: set[int] = set()
-    for residue_id, x, y, z in receptor_atoms:
+    residues: set[str] = set()
+    for chain_id, residue_id, x, y, z in receptor_atoms:
         for lx, ly, lz in ligand_atoms:
             distance_sq = ((x - lx) ** 2) + ((y - ly) ** 2) + ((z - lz) ** 2)
             if distance_sq <= cutoff_sq:
-                residues.add(residue_id)
+                residues.add(residue_key(chain_id, residue_id))
                 break
-    return sorted(residues)
+    return sorted(
+        residues,
+        key=lambda value: (
+            value.split(":", 1)[0],
+            int(value.split(":", 1)[1]),
+        ),
+    )
 
 
 def write_receptor_pdb(receptor_lines: list[str], destination: Path) -> Path:
@@ -178,16 +189,22 @@ def prepare_receptor_pdbqt(receptor_pdb: Path, destination: Path) -> None:
     )
 
 
-def render_residue_set(residue_ids: list[int]) -> str:
+def render_residue_set(residue_ids: list[str]) -> str:
     wrapped = textwrap.wrap(
-        ", ".join(str(residue_id) for residue_id in residue_ids),
+        ", ".join(repr(residue_id) for residue_id in residue_ids),
         width=68,
         subsequent_indent=" " * 12,
     )
     return "\n".join(wrapped)
 
 
-def write_config(spec: TargetSpec, target_dir: Path, center: tuple[float, float, float], size: tuple[float, float, float], residue_ids: list[int]) -> None:
+def write_config(
+    spec: TargetSpec,
+    target_dir: Path,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    residue_ids: list[str],
+) -> None:
     config_text = f'''from biofuzz.docking.config import BoxConfig, PocketConfig, TargetConfig
 
 TARGET = TargetConfig(

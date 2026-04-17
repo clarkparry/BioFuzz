@@ -4,9 +4,17 @@ from dataclasses import dataclass
 from pathlib import Path
 import base64
 import json
-from typing import Mapping
+from typing import Iterable, Mapping
 
-COVERAGE_CHECKPOINT_VERSION = 2
+from biofuzz.protein.residue_keys import (
+    is_qualified_residue_key,
+    normalize_residue_key,
+    normalize_residue_keys,
+    residue_number,
+    sort_residue_keys,
+)
+
+COVERAGE_CHECKPOINT_VERSION = 3
 DEFAULT_COVERAGE_MODE = "hashed_fingerprint"
 DEFAULT_COVERAGE_MAP_SIZE_KIB = 256
 DEFAULT_COVERAGE_MAP_SIZE_BYTES = DEFAULT_COVERAGE_MAP_SIZE_KIB * 1024
@@ -63,7 +71,7 @@ def validate_coverage_settings(
 
 @dataclass(frozen=True)
 class CoverageObservation:
-    fingerprint: frozenset[int]
+    fingerprint: frozenset[str]
     fingerprint_mask: int
     hash_index: int
     novelty_class: str
@@ -73,10 +81,74 @@ class CoverageObservation:
     rotated: bool = False
 
 
+def checkpoint_pocket_residue_ids(
+    payload: Mapping[str, object],
+    current_pocket_residue_ids: Iterable[str] | None = None,
+) -> set[str]:
+    raw_residue_ids = payload.get("pocket_residue_ids", [])
+    saved_residue_ids = normalize_residue_keys(raw_residue_ids)  # type: ignore[arg-type]
+    return _resolve_saved_residue_ids(saved_residue_ids, current_pocket_residue_ids)
+
+
+def _resolve_saved_residue_ids(
+    saved_residue_ids: set[str],
+    current_pocket_residue_ids: Iterable[str] | None,
+) -> set[str]:
+    current_residue_ids = (
+        normalize_residue_keys(current_pocket_residue_ids)
+        if current_pocket_residue_ids is not None
+        else set()
+    )
+    if not saved_residue_ids:
+        return set()
+
+    resolved: set[str] = set()
+    for residue_id in saved_residue_ids:
+        if is_qualified_residue_key(residue_id):
+            resolved.add(normalize_residue_key(residue_id))
+            continue
+        if residue_id in current_residue_ids:
+            resolved.add(residue_id)
+            continue
+
+        matches = [
+            candidate
+            for candidate in current_residue_ids
+            if residue_number(candidate) == residue_number(residue_id)
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                "Coverage checkpoint legacy residue ID "
+                f"{residue_id} maps to multiple chain-aware target residues"
+            )
+        if len(matches) == 1:
+            resolved.add(matches[0])
+            continue
+        resolved.add(residue_id)
+    return resolved
+
+
+def _resolve_saved_mapping(
+    raw_mapping: Mapping[object, object],
+    current_pocket_residue_ids: Iterable[str],
+) -> dict[str, int]:
+    resolved: dict[str, int] = {}
+    current_residue_ids = normalize_residue_keys(current_pocket_residue_ids)
+    for residue_id, bit_index in raw_mapping.items():
+        normalized_key = normalize_residue_key(str(residue_id))
+        resolved_keys = _resolve_saved_residue_ids({normalized_key}, current_residue_ids)
+        if len(resolved_keys) != 1:
+            raise ValueError(
+                f"Coverage checkpoint residue mapping for {residue_id} could not be resolved"
+            )
+        resolved[resolved_keys.pop()] = int(bit_index)
+    return resolved
+
+
 class CoverageMap:
     def __init__(
         self,
-        pocket_residue_ids: set[int] | list[int] | tuple[int, ...],
+        pocket_residue_ids: Iterable[str | int],
         *,
         map_size_bytes: int = DEFAULT_COVERAGE_MAP_SIZE_BYTES,
         occupancy_rotate_threshold: float = DEFAULT_OCCUPANCY_ROTATE_THRESHOLD,
@@ -105,20 +177,22 @@ class CoverageMap:
 
     def _set_pocket_residue_ids(
         self,
-        pocket_residue_ids: set[int] | list[int] | tuple[int, ...],
+        pocket_residue_ids: Iterable[str | int],
     ) -> None:
-        self.pocket_residue_ids: set[int] = {int(rid) for rid in pocket_residue_ids}
-        self._sorted_pocket_residue_ids = tuple(sorted(self.pocket_residue_ids))
+        self.pocket_residue_ids: set[str] = normalize_residue_keys(pocket_residue_ids)
+        self._sorted_pocket_residue_ids = tuple(sort_residue_keys(self.pocket_residue_ids))
         self.residue_to_bit_index = {
             residue_id: idx for idx, residue_id in enumerate(self._sorted_pocket_residue_ids)
         }
 
-    def _normalize_fingerprint(self, fingerprint: frozenset[int]) -> frozenset[int]:
+    def _normalize_fingerprint(self, fingerprint: frozenset[str]) -> frozenset[str]:
         return frozenset(
-            int(rid) for rid in fingerprint if int(rid) in self.pocket_residue_ids
+            normalize_residue_key(rid)
+            for rid in fingerprint
+            if normalize_residue_key(rid) in self.pocket_residue_ids
         )
 
-    def fingerprint_to_mask(self, fingerprint: frozenset[int]) -> tuple[frozenset[int], int]:
+    def fingerprint_to_mask(self, fingerprint: frozenset[str]) -> tuple[frozenset[str], int]:
         valid_fingerprint = self._normalize_fingerprint(fingerprint)
         mask = 0
         for residue_id in valid_fingerprint:
@@ -190,7 +264,7 @@ class CoverageMap:
         self.current_nonzero_count = 0
         self.epoch += 1
 
-    def observe(self, fingerprint: frozenset[int]) -> CoverageObservation:
+    def observe(self, fingerprint: frozenset[str]) -> CoverageObservation:
         valid_fingerprint, fingerprint_mask = self.fingerprint_to_mask(fingerprint)
 
         if not self.enabled:
@@ -240,7 +314,7 @@ class CoverageMap:
             rotated=rotated,
         )
 
-    def update(self, fingerprint: frozenset[int]) -> frozenset[int]:
+    def update(self, fingerprint: frozenset[str]) -> frozenset[str]:
         self.observe(fingerprint)
         return frozenset()
 
@@ -267,9 +341,10 @@ class CoverageMap:
         output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _load_legacy_payload(self, payload: Mapping[str, object]) -> None:
-        saved_pocket_residue_ids = {
-            int(value) for value in payload.get("pocket_residue_ids", [])  # type: ignore[arg-type]
-        }
+        saved_pocket_residue_ids = checkpoint_pocket_residue_ids(
+            payload,
+            self.pocket_residue_ids,
+        )
         if self.pocket_residue_ids and saved_pocket_residue_ids:
             if self.pocket_residue_ids != saved_pocket_residue_ids:
                 raise ValueError("Coverage checkpoint pocket residues differ from target pocket")
@@ -317,18 +392,19 @@ class CoverageMap:
                 "Coverage checkpoint map size does not match current coverage configuration"
             )
 
-        saved_pocket_residue_ids = {
-            int(value) for value in payload.get("pocket_residue_ids", [])
-        }
+        saved_pocket_residue_ids = checkpoint_pocket_residue_ids(
+            payload,
+            self.pocket_residue_ids,
+        )
         if self.pocket_residue_ids and saved_pocket_residue_ids:
             if self.pocket_residue_ids != saved_pocket_residue_ids:
                 raise ValueError("Coverage checkpoint pocket residues differ from target pocket")
         self._set_pocket_residue_ids(saved_pocket_residue_ids)
 
-        saved_mapping = {
-            int(residue_id): int(bit_index)
-            for residue_id, bit_index in payload.get("residue_to_bit_index", {}).items()
-        }
+        saved_mapping = _resolve_saved_mapping(
+            payload.get("residue_to_bit_index", {}),
+            self.pocket_residue_ids,
+        )
         if saved_mapping and saved_mapping != self.residue_to_bit_index:
             raise ValueError("Coverage checkpoint residue mapping does not match sorted pocket order")
 

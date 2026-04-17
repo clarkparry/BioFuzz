@@ -1,0 +1,29 @@
+Task: Resolve the remaining accuracy limitations from TODO.md by making coverage chain-aware, migrating checkpoint/config formats safely, and making selectivity handling explicit and configurable.
+
+Challenges:
+- Coverage currently assumes residue-number-only identifiers across parsing, fingerprints, checkpoints, resume guards, tests, and checked-in target configs.
+- The selectivity oracle exposes only a boolean outcome today, so adding explicit statuses and policy handling has to stay backward-compatible with the rest of the run loop and findings metadata.
+- The changes span code, fixtures, runtime summaries, and regression coverage, so the implementation needs one coherent schema update instead of piecemeal local fixes.
+
+Approach:
+- Introduce a normalized residue-key format that accepts legacy integer-like inputs but stores and emits chain-qualified string IDs end-to-end.
+- Version the coverage checkpoint schema, support migration from the older residue-number-only checkpoints, and tighten resume checks around the new key format.
+- Extend the oracle verdict model with explicit selectivity status and configurable fail-open/fail-closed policy, then surface selectivity counters in run stats and CLI output.
+- Update target configs, fixture-generation tooling, and focused regression tests to prove multimeric residues stay distinct and selectivity outcomes are reported correctly.
+
+Completed Approach:
+- Added `biofuzz/protein/residue_keys.py` and rewired residue parsing, pocket fingerprinting, coverage mapping, and hashed checkpoint persistence to use chain-qualified residue IDs such as `A:42`.
+- Bumped coverage checkpoints to schema version 3, migrated single-chain legacy checkpoints by resolving residue numbers against the current target pocket, and rejected ambiguous multimeric legacy checkpoints instead of silently aliasing them.
+- Updated bundled target configs plus `.agent/tools/prepare_target_fixture.py` to emit chain-qualified pocket residue IDs; the HIV protease target now tracks both `A:*` and `B:*` pocket contacts distinctly.
+- Extended `OracleConfig`/`OracleVerdict` with `selectivity_policy` and explicit selectivity statuses (`passed`, `failed`, `skipped_unavailable`, `not_configured`), then surfaced aggregate selectivity counters in run stats and CLI output.
+- Added regression coverage for chain-distinct fingerprints/coverage bits, legacy checkpoint migration, target-config pocket qualification, fail-closed selectivity handling, and selectivity summary counters in fuzzer/main flows.
+
+Outcome:
+- Multimeric targets no longer collapse same-number residues across chains in fingerprints, coverage novelty, or checkpoint mappings.
+- Resume behavior is safe: older residue-number-only checkpoints still migrate for unambiguous single-chain pockets, while ambiguous multimeric checkpoints are skipped instead of being misapplied.
+- Campaign summaries now distinguish selectivity outcomes explicitly, and users can switch between robust `fail_open` behavior and stricter `fail_closed` gating with `oracle.selectivity_policy`.
+
+Validation:
+- `./.venv/bin/python -m pytest tests/test_coverage.py tests/test_oracle.py tests/test_config.py tests/test_fuzzer.py tests/test_main.py -q` -> `77 passed`
+- `./.venv/bin/python -m pytest -q` -> `124 passed`
+- `./.venv/bin/python main.py --target hiv_protease --seeds runs/smoke_cli_2026_04_14_chain_selectivity_seed.smi --max-iterations 0 --workers 1 --output runs/smoke_cli_2026_04_14_chain_selectivity` -> completed successfully with chain-aware HIV target config and selectivity summary counters in CLI output

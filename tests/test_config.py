@@ -75,6 +75,36 @@ def test_load_target_config_ignores_same_named_file_in_current_workdir(tmp_path:
     assert cfg.receptor == str(target_dir / "protein.pdbqt")
 
 
+def test_load_target_config_qualifies_legacy_pocket_residue_ids_using_receptor_chains(
+    tmp_path: Path,
+) -> None:
+    targets_dir = tmp_path / "targets"
+    target_dir = targets_dir / "mini"
+    target_dir.mkdir(parents=True)
+    (target_dir / "protein.pdbqt").write_text(
+        "ATOM      1  CA  MET A   1       0.0   0.0   0.0  0.00  0.00  0.000 C\n"
+        "ATOM      2  CA  MET B   1       5.0   5.0   5.0  0.00  0.00  0.000 C\n"
+        "ATOM      3  CA  MET A   2       1.0   1.0   1.0  0.00  0.00  0.000 C\n",
+        encoding="utf-8",
+    )
+    (target_dir / "config.py").write_text(
+        (
+            "from biofuzz.docking.config import BoxConfig, PocketConfig, TargetConfig\n"
+            "TARGET = TargetConfig(\n"
+            "    name='mini',\n"
+            "    receptor='protein.pdbqt',\n"
+            "    box=BoxConfig(center_x=0, center_y=0, center_z=0, size_x=10, size_y=10, size_z=10),\n"
+            "    pocket=PocketConfig(residue_ids={1, 2}, contact_cutoff=3.5),\n"
+            ")\n"
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_target_config("mini", targets_dir=targets_dir)
+
+    assert cfg.pocket.residue_ids == {"A:1", "B:1", "A:2"}
+
+
 def test_apply_global_defaults_to_target_merges_oracle_defaults() -> None:
     target = TargetConfig(
         name="mini",
@@ -185,5 +215,6 @@ def test_bundled_targets_load_with_prepared_assets() -> None:
         assert cfg.name == target_name
         assert Path(cfg.receptor).exists()
         assert target_dir.joinpath("config.py").exists()
+        assert all(":" in residue_id for residue_id in cfg.pocket.residue_ids)
         for filename in reference_files:
             assert target_dir.joinpath("reference_ligands", filename).exists()

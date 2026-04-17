@@ -40,6 +40,7 @@ def test_evaluate_rejects_weak_binder() -> None:
     pose = "REMARK strain 1.2\n"
     verdict = evaluate(modes, pose, OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5))
     assert not verdict.is_hit
+    assert verdict.selectivity_status == "not_configured"
 
 
 def test_evaluate_rejects_high_strain() -> None:
@@ -48,6 +49,7 @@ def test_evaluate_rejects_high_strain() -> None:
     verdict = evaluate(modes, pose, OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5))
     assert not verdict.is_hit
     assert "strain" in verdict.notes.lower()
+    assert verdict.selectivity_status == "not_configured"
 
 
 def test_evaluate_accepts_good_affinity_and_strain() -> None:
@@ -56,6 +58,7 @@ def test_evaluate_accepts_good_affinity_and_strain() -> None:
     verdict = evaluate(modes, pose, OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5))
     assert verdict.is_hit
     assert verdict.affinity < -9.0
+    assert verdict.selectivity_status == "not_configured"
 
 
 def test_evaluate_skips_selectivity_when_affinity_fails(monkeypatch) -> None:
@@ -104,6 +107,7 @@ def test_evaluate_applies_selectivity_after_affinity_pass(monkeypatch) -> None:
 
     assert calls == ["CCO"]
     assert not verdict.is_hit
+    assert verdict.selectivity_status == "failed"
     assert "Selectivity ratio below threshold" in verdict.notes
 
 
@@ -118,7 +122,39 @@ def test_evaluate_skips_selectivity_when_redock_unavailable(monkeypatch) -> None
     verdict = evaluate(modes, pose, _target_with_offtarget(), smiles="CCO")
 
     assert verdict.is_hit
+    assert verdict.selectivity_status == "skipped_unavailable"
     assert "Selectivity skipped" in verdict.notes
+
+
+def test_evaluate_can_fail_closed_when_selectivity_is_unavailable(monkeypatch) -> None:
+    def fake_selectivity(smiles: str, target: TargetConfig, **kwargs) -> float | None:
+        return None
+
+    monkeypatch.setattr(affinity_oracle, "selectivity_ratio_from_target", fake_selectivity)
+
+    modes = [DockingMode(mode=1, affinity=-10.3, rmsd_lb=0.0, rmsd_ub=0.0)]
+    pose = "REMARK internal strain 0.9\n"
+    target = _target_with_offtarget()
+    target = TargetConfig(
+        name=target.name,
+        receptor=target.receptor,
+        box=target.box,
+        pocket=target.pocket,
+        oracle=OracleConfig(
+            affinity_threshold=-9.0,
+            strain_threshold=3.5,
+            selectivity_ratio_min=2.0,
+            selectivity_policy="fail_closed",
+        ),
+        offtarget_receptor=target.offtarget_receptor,
+        offtarget_box=target.offtarget_box,
+    )
+
+    verdict = evaluate(modes, pose, target, smiles="CCO")
+
+    assert not verdict.is_hit
+    assert verdict.selectivity_status == "skipped_unavailable"
+    assert "fail_closed" in verdict.notes
 
 
 def test_evaluate_can_skip_selectivity_until_confirmation(monkeypatch) -> None:
@@ -142,6 +178,7 @@ def test_evaluate_can_skip_selectivity_until_confirmation(monkeypatch) -> None:
 
     assert verdict.is_hit
     assert calls == []
+    assert verdict.selectivity_status == "not_configured"
 
 
 def test_selectivity_best_affinity_cleans_pose_file(monkeypatch, tmp_path) -> None:
