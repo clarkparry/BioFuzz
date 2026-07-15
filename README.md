@@ -33,7 +33,7 @@ python .agent/tools/install_gnina.py
 python .agent/tools/prepare_target_fixture.py
 ```
 
-Steps 2 and 3 are one-time setup: their outputs (`.tools/bin/`, `targets/*/protein.pdbqt`, `targets/*/reference_ligands/*.pdbqt`) are gitignored and must be rebuilt after every fresh clone.
+Steps 2 and 3 are one-time setup: their outputs (`.tools/bin/`, `targets/*/protein.pdbqt`, `targets/*/reference_ligands/*.pdbqt`) are gitignored and must be rebuilt after every fresh clone. To add a target beyond the five bundled ones, see [`docs/adding_targets.md`](docs/adding_targets.md).
 
 ## Usage
 

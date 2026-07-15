@@ -10,3 +10,4 @@ amp.log
 # Generated target fixtures — rebuild with .agent/tools/prepare_target_fixture.py
 targets/*/protein.pdbqt
 targets/*/reference_ligands/*.pdbqt
+.agent/tools/target-build/

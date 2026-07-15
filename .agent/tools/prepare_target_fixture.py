@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import sys
-import textwrap
 import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -19,15 +18,22 @@ MK_PREPARE_RECEPTOR = REPO_ROOT / ".venv" / "bin" / "mk_prepare_receptor.py"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from biofuzz.molecules.preparation import prepare_smiles
-from biofuzz.protein.residue_keys import residue_key
+from biofuzz.prep.preparation import prepare_smiles
+from biofuzz.protein.residues import residue_key
+
+# Reference-ligand prep only needs a valid embeddable 3D structure, not the
+# drug-likeness bounds applied to fuzzed candidates — bounds are wide open
+# so real approved drugs (e.g. indinavir, MW ~614) don't get rejected.
+REFERENCE_LIGAND_BOUNDS = dict(
+    min_mw=0.0, max_mw=2000.0, max_logp=100.0, max_hbd=100, max_hba=100, max_rot_bonds=100,
+)
 
 
 @dataclass(frozen=True)
 class TargetSpec:
     name: str
     pdb_id: str
-    protein_chain: str
+    protein_chains: tuple[str, ...]
     ligand_code: str
     inhibitor_name: str
 
@@ -36,30 +42,43 @@ TARGET_SPECS: dict[str, TargetSpec] = {
     "egfr_kinase": TargetSpec(
         name="egfr_kinase",
         pdb_id="1M17",
-        protein_chain="A",
+        protein_chains=("A",),
         ligand_code="AQ4",
         inhibitor_name="erlotinib",
     ),
     "parp1": TargetSpec(
+        # 2021 redetermination at 2.06 A vs. 4UND's 2015/2.2 A; same compound.
         name="parp1",
-        pdb_id="4UND",
-        protein_chain="A",
+        pdb_id="7KK3",
+        protein_chains=("A",),
         ligand_code="2YQ",
         inhibitor_name="talazoparib",
     ),
     "sars_cov2_mpro": TargetSpec(
+        # 2022 redetermination at 1.50 A vs. 7SI9's 2021/2.0 A; same compound,
+        # confirmed wild-type (many newer, higher-res Mpro/nirmatrelvir entries
+        # are resistance-mutant studies and were passed over for that reason).
         name="sars_cov2_mpro",
-        pdb_id="7SI9",
-        protein_chain="A",
+        pdb_id="7VLP",
+        protein_chains=("A",),
         ligand_code="4WI",
         inhibitor_name="nirmatrelvir",
     ),
     "braf_v600e": TargetSpec(
         name="braf_v600e",
         pdb_id="3OG7",
-        protein_chain="A",
+        protein_chains=("A",),
         ligand_code="032",
         inhibitor_name="vemurafenib",
+    ),
+    "hiv_protease": TargetSpec(
+        # HIV-1 protease is an obligate homodimer; the active site sits at the
+        # A/B interface, so both chains are needed for a complete pocket.
+        name="hiv_protease",
+        pdb_id="1HSG",
+        protein_chains=("A", "B"),
+        ligand_code="MK1",
+        inhibitor_name="indinavir",
     ),
 }
 
@@ -88,7 +107,7 @@ def parse_ligand_smiles(ligand_cif: Path) -> str:
 
 def parse_structure(
     pdb_path: Path,
-    protein_chain: str,
+    protein_chains: tuple[str, ...],
     ligand_code: str,
 ) -> tuple[list[str], list[tuple[str, int, float, float, float]], list[tuple[float, float, float]]]:
     receptor_lines: list[str] = []
@@ -102,7 +121,7 @@ def parse_structure(
         if altloc not in {" ", "A"}:
             continue
         chain_id = raw_line[21].strip()
-        if chain_id != protein_chain:
+        if chain_id not in protein_chains:
             continue
 
         resname = raw_line[17:20].strip()
@@ -119,9 +138,9 @@ def parse_structure(
             ligand_atoms.append((x, y, z))
 
     if not receptor_lines:
-        raise ValueError(f"No receptor atoms found in chain {protein_chain} for {pdb_path}")
+        raise ValueError(f"No receptor atoms found in chains {protein_chains} for {pdb_path}")
     if not ligand_atoms:
-        raise ValueError(f"No ligand atoms found for {ligand_code} in chain {protein_chain} for {pdb_path}")
+        raise ValueError(f"No ligand atoms found for {ligand_code} in chains {protein_chains} for {pdb_path}")
 
     return receptor_lines, receptor_atoms, ligand_atoms
 
@@ -189,15 +208,6 @@ def prepare_receptor_pdbqt(receptor_pdb: Path, destination: Path) -> None:
     )
 
 
-def render_residue_set(residue_ids: list[str]) -> str:
-    wrapped = textwrap.wrap(
-        ", ".join(repr(residue_id) for residue_id in residue_ids),
-        width=68,
-        subsequent_indent=" " * 12,
-    )
-    return "\n".join(wrapped)
-
-
 def write_config(
     spec: TargetSpec,
     target_dir: Path,
@@ -205,28 +215,24 @@ def write_config(
     size: tuple[float, float, float],
     residue_ids: list[str],
 ) -> None:
-    config_text = f'''from biofuzz.docking.config import BoxConfig, PocketConfig, TargetConfig
+    residue_lines = "\n".join(f'    - "{residue_id}"' for residue_id in residue_ids)
+    config_text = f'''name: {spec.name}
+receptor: protein.pdbqt
 
-TARGET = TargetConfig(
-    name="{spec.name}",
-    receptor="protein.pdbqt",
-    box=BoxConfig(
-        center_x={center[0]},
-        center_y={center[1]},
-        center_z={center[2]},
-        size_x={size[0]},
-        size_y={size[1]},
-        size_z={size[2]},
-    ),
-    pocket=PocketConfig(
-        residue_ids={{
-            {render_residue_set(residue_ids)}
-        }},
-        contact_cutoff=3.5,
-    ),
-)
+box:
+  center_x: {center[0]}
+  center_y: {center[1]}
+  center_z: {center[2]}
+  size_x: {size[0]}
+  size_y: {size[1]}
+  size_z: {size[2]}
+
+pocket:
+  contact_cutoff: 3.5
+  residue_ids:
+{residue_lines}
 '''
-    (target_dir / "config.py").write_text(config_text, encoding="utf-8")
+    (target_dir / "config.yaml").write_text(config_text, encoding="utf-8")
 
 
 def build_target(spec: TargetSpec) -> None:
@@ -241,7 +247,7 @@ def build_target(spec: TargetSpec) -> None:
     smiles = parse_ligand_smiles(ligand_cif)
     receptor_lines, receptor_atoms, ligand_atoms = parse_structure(
         pdb_path,
-        spec.protein_chain,
+        spec.protein_chains,
         spec.ligand_code,
     )
     center, size = compute_box(ligand_atoms)
@@ -260,13 +266,13 @@ def build_target(spec: TargetSpec) -> None:
         f"{smiles} {spec.inhibitor_name}\n",
         encoding="utf-8",
     )
-    ligand_pdbqt = prepare_smiles(smiles, require_drug_like=False)
+    ligand_pdbqt = prepare_smiles(smiles, **REFERENCE_LIGAND_BOUNDS)
     if ligand_pdbqt is None:
         raise ValueError(f"Failed to prepare reference ligand for {spec.name}: {spec.inhibitor_name}")
     (reference_dir / f"{ligand_slug}.pdbqt").write_text(ligand_pdbqt, encoding="utf-8")
 
     print(
-        f"prepared {spec.name}: pdb={spec.pdb_id} chain={spec.protein_chain} ligand={spec.ligand_code} "
+        f"prepared {spec.name}: pdb={spec.pdb_id} chains={spec.protein_chains} ligand={spec.ligand_code} "
         f"center={center} size={size} residues={len(residue_ids)}"
     )
 
