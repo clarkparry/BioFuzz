@@ -31,9 +31,15 @@ def _rmsd(atoms_a, atoms_b) -> float | None:
 class ConfirmationDockingStage:
     name = "confirmation_docking"
 
-    def __init__(self, exhaustiveness: int = 16, timeout_seconds: int = 300):
+    def __init__(
+        self,
+        exhaustiveness: int = 16,
+        timeout_seconds: int = 300,
+        cnn_model: str | None = None,
+    ):
         self.exhaustiveness = exhaustiveness
         self.timeout_seconds = timeout_seconds
+        self.cnn_model = cnn_model
 
     def analyze(self, record: TriageRecord, target_config: dict, **kwargs) -> TriageStageResult:
         pdbqt = prepare_smiles(record.smiles, **DEFAULT_FILTER_KWARGS)
@@ -48,6 +54,7 @@ class ConfirmationDockingStage:
             exhaustiveness=self.exhaustiveness,
             num_modes=3,
             timeout_seconds=self.timeout_seconds,
+            cnn_model=self.cnn_model,
         )
 
         backend = GninaBackend()

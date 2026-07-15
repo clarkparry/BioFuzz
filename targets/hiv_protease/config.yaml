@@ -1,3 +1,7 @@
+# hand-curated: HIV-1 protease's active site sits at the A/B dimer interface
+# and includes flexible flap residues that a flat distance cutoff from the
+# co-crystal ligand undershoots. Do not overwrite with the automated fixture
+# builder's output — see docs/adding_targets.md.
 name: hiv_protease
 receptor: protein.pdbqt
 

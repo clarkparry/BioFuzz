@@ -105,6 +105,8 @@ class GninaBackend(DockingBackend):
             ]
             if config.workers > 1:
                 argv += ["--cpu", "1"]
+            if config.cnn_model:
+                argv += ["--cnn", config.cnn_model]
 
             try:
                 proc = self._run_dock_process(argv, config.timeout_seconds)

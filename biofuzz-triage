@@ -37,6 +37,7 @@ def main() -> int:
         if args.exhaustiveness_confirm is not None
         else global_config.get("docking", {}).get("exhaustiveness_confirm", 16)
     )
+    cnn_model_confirm = global_config.get("docking", {}).get("cnn_model_confirm")
 
     receptor_path = str(Path("targets") / args.target / target_config["receptor"])
     output_dir = args.output or str(Path(args.findings).parent / "triage")
@@ -47,7 +48,9 @@ def main() -> int:
         findings_dir=args.findings,
         target_config=target_config,
         receptor_path=receptor_path,
-        stages=default_stages(exhaustiveness_confirm=exhaustiveness_confirm),
+        stages=default_stages(
+            exhaustiveness_confirm=exhaustiveness_confirm, cnn_model_confirm=cnn_model_confirm
+        ),
     )
 
     report_path = write_report(records, output_dir, top_n=args.top_n)

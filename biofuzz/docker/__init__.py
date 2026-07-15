@@ -18,6 +18,7 @@ class DockingConfig:
     timeout_seconds: int
     workers: int = 1
     engine_path: str | None = None
+    cnn_model: str | None = None
 
 
 @dataclass

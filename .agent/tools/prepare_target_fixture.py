@@ -208,13 +208,37 @@ def prepare_receptor_pdbqt(receptor_pdb: Path, destination: Path) -> None:
     )
 
 
+# Set on a config.yaml's first line to protect it from being overwritten by
+# a re-run -- e.g. a target whose box/pocket were tuned by hand rather than
+# by this script's flat-distance-cutoff heuristic (see hiv_protease).
+HAND_CURATED_MARKER = "# hand-curated"
+
+# Matches a trailing "# Reference: ...\noracle:\n  key: value\n..." block so
+# a rebuild preserves oracle calibration a human added after the fact --
+# write_config() has no way to derive affinity_threshold itself (that
+# requires actually docking the reference ligand).
+_ORACLE_BLOCK_RE = re.compile(r"\n(#[^\n]*\n)?oracle:\n(?:[ \t]+\S.*\n?)+")
+
+
+def _preserved_oracle_block(existing_config: Path) -> str:
+    if not existing_config.exists():
+        return ""
+    match = _ORACLE_BLOCK_RE.search(existing_config.read_text(encoding="utf-8"))
+    return match.group(0) if match else ""
+
+
 def write_config(
     spec: TargetSpec,
     target_dir: Path,
     center: tuple[float, float, float],
     size: tuple[float, float, float],
     residue_ids: list[str],
-) -> None:
+) -> bool:
+    destination = target_dir / "config.yaml"
+    if destination.exists() and destination.read_text(encoding="utf-8").startswith(HAND_CURATED_MARKER):
+        print(f"Skipping {destination}: hand-curated, not overwriting (see docs/adding_targets.md)")
+        return False
+
     residue_lines = "\n".join(f'    - "{residue_id}"' for residue_id in residue_ids)
     config_text = f'''name: {spec.name}
 receptor: protein.pdbqt
@@ -232,7 +256,9 @@ pocket:
   residue_ids:
 {residue_lines}
 '''
-    (target_dir / "config.yaml").write_text(config_text, encoding="utf-8")
+    config_text += _preserved_oracle_block(destination)
+    destination.write_text(config_text, encoding="utf-8")
+    return True
 
 
 def build_target(spec: TargetSpec) -> None:
@@ -259,7 +285,7 @@ def build_target(spec: TargetSpec) -> None:
 
     receptor_pdb = write_receptor_pdb(receptor_lines, build_dir / f"{spec.name}_receptor.pdb")
     prepare_receptor_pdbqt(receptor_pdb, target_dir / "protein.pdbqt")
-    write_config(spec, target_dir, center, size, residue_ids)
+    config_written = write_config(spec, target_dir, center, size, residue_ids)
 
     ligand_slug = spec.inhibitor_name.replace("-", "_")
     (reference_dir / f"{ligand_slug}.smi").write_text(
@@ -271,9 +297,10 @@ def build_target(spec: TargetSpec) -> None:
         raise ValueError(f"Failed to prepare reference ligand for {spec.name}: {spec.inhibitor_name}")
     (reference_dir / f"{ligand_slug}.pdbqt").write_text(ligand_pdbqt, encoding="utf-8")
 
+    config_note = "" if config_written else " (config.yaml untouched)"
     print(
         f"prepared {spec.name}: pdb={spec.pdb_id} chains={spec.protein_chains} ligand={spec.ligand_code} "
-        f"center={center} size={size} residues={len(residue_ids)}"
+        f"center={center} size={size} residues={len(residue_ids)}{config_note}"
     )
 
 

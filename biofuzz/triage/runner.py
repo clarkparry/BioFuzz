@@ -14,14 +14,14 @@ from biofuzz.triage.selectivity import SelectivityStage
 _RECORD_FIELD_NAMES = {f.name for f in fields(TriageRecord)}
 
 
-def default_stages(exhaustiveness_confirm: int = 16) -> list:
+def default_stages(exhaustiveness_confirm: int = 16, cnn_model_confirm: str | None = None) -> list:
     return [
-        ConfirmationDockingStage(exhaustiveness=exhaustiveness_confirm),
+        ConfirmationDockingStage(exhaustiveness=exhaustiveness_confirm, cnn_model=cnn_model_confirm),
         PoseQualityStage(),
         ADMETStage(),  # must run before LigandEfficiencyStage: it computes heavy_atom_count
         LigandEfficiencyStage(),
         ChemistryFlagsStage(),
-        SelectivityStage(exhaustiveness=exhaustiveness_confirm),
+        SelectivityStage(exhaustiveness=exhaustiveness_confirm, cnn_model=cnn_model_confirm),
     ]
 
 

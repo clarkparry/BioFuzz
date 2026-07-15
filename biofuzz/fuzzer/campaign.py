@@ -126,6 +126,7 @@ class Campaign:
             num_modes=docking_cfg.get("num_modes", 3),
             timeout_seconds=docking_cfg.get("timeout_seconds", 120),
             workers=self.workers,
+            cnn_model=docking_cfg.get("cnn_model_fuzz", "fast"),
         )
 
     def _build_oracle_config(self, target_config: dict) -> OracleConfig:

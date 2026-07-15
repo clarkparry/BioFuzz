@@ -2,6 +2,11 @@
 docking:
   exhaustiveness_fuzz: 4
   exhaustiveness_confirm: 16
+  # CNN model for gnina's pose/affinity scoring pass. "fast" uses a single
+  # lightweight model (~5x faster on CPU); null omits --cnn entirely, which
+  # falls back to gnina's default full model ensemble (slower, most accurate).
+  cnn_model_fuzz: fast
+  cnn_model_confirm: null
   num_modes: 3
   engine: gnina
 
