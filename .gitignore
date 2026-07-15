@@ -2,7 +2,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
-.agent/tools/bin/
+.tools/bin/
 
 runs/
 amp.log
+
+# Generated target fixtures — rebuild with .agent/tools/prepare_target_fixture.py
+targets/*/protein.pdbqt
+targets/*/reference_ligands/*.pdbqt

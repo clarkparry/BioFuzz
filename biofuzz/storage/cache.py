@@ -1,34 +1,48 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 from pathlib import Path
 
 
 class PDBQTCache:
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._memory: dict[str, str] = {}
+    def __init__(self, root_dir: Path | str, max_memory_entries: int = 10000):
+        self.root_dir = Path(root_dir)
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+        self.max_memory_entries = max_memory_entries
+        self._memory: OrderedDict[str, str] = OrderedDict()
 
-    @staticmethod
-    def _cache_key(smiles: str) -> str:
-        return hashlib.sha1(smiles.encode("utf-8")).hexdigest()
+    def _key(self, smiles: str) -> str:
+        return hashlib.sha256(smiles.encode()).hexdigest()
 
-    def _cache_path(self, smiles: str) -> Path:
-        return self.root / f"{self._cache_key(smiles)}.pdbqt"
+    def _disk_path(self, key: str) -> Path:
+        return self.root_dir / f"{key}.pdbqt"
 
     def get(self, smiles: str) -> str | None:
-        if smiles in self._memory:
-            return self._memory[smiles]
+        key = self._key(smiles)
+        if key in self._memory:
+            self._memory.move_to_end(key)
+            return self._memory[key]
 
-        path = self._cache_path(smiles)
-        if not path.exists():
-            return None
+        disk_path = self._disk_path(key)
+        if disk_path.exists():
+            pdbqt = disk_path.read_text()
+            self._insert_memory(key, pdbqt)
+            return pdbqt
 
-        text = path.read_text(encoding="utf-8")
-        self._memory[smiles] = text
-        return text
+        return None
 
-    def set(self, smiles: str, pdbqt_text: str) -> None:
-        self._memory[smiles] = pdbqt_text
-        self._cache_path(smiles).write_text(pdbqt_text, encoding="utf-8")
+    def set(self, smiles: str, pdbqt: str) -> None:
+        key = self._key(smiles)
+        self._disk_path(key).write_text(pdbqt)
+        self._insert_memory(key, pdbqt)
+
+    def _insert_memory(self, key: str, pdbqt: str) -> None:
+        self._memory[key] = pdbqt
+        self._memory.move_to_end(key)
+        if len(self._memory) > self.max_memory_entries:
+            self.evict_memory_lru()
+
+    def evict_memory_lru(self) -> None:
+        if self._memory:
+            self._memory.popitem(last=False)

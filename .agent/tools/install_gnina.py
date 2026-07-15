@@ -13,7 +13,7 @@ from pathlib import Path
 DEFAULT_VERSION = "1.3.2"
 DEFAULT_VARIANT = "compat"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT = REPO_ROOT / ".agent" / "tools" / "bin" / "gnina"
+DEFAULT_OUTPUT = REPO_ROOT / ".tools" / "bin" / "gnina"
 
 VARIANT_SUFFIX = {
     "compat": "",

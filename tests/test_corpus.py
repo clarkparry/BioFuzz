@@ -1,142 +1,93 @@
-from __future__ import annotations
+import os
+import tempfile
 
-import pytest
-
-from biofuzz.core.corpus import Corpus, CorpusEntry
-from biofuzz.core.fuzzer import (
-    compute_mutation_budget,
-    compute_power_score,
-    compute_priority,
-    compute_priority_weighted,
-)
+from biofuzz.corpus import Corpus, CorpusEntry
 
 
-def _entry(smiles: str, priority: float) -> CorpusEntry:
-    return CorpusEntry(smiles=smiles, source_id="test", priority=priority)
+def test_trim_and_pop_highest_priority():
+    corpus = Corpus(max_size=100)
+
+    for i in range(150):
+        corpus.add(CorpusEntry(smiles="C" * (i + 1), priority=float(i)))
+
+    assert corpus.size() == 100
+
+    remaining_priorities = [e.priority for e in corpus._entries.values()]
+    top = corpus.pop()
+    assert top.priority == max(remaining_priorities)
 
 
-def test_corpus_pop_returns_highest_priority() -> None:
-    corpus = Corpus()
-    corpus.add(_entry("CCO", 1.0))
-    corpus.add(_entry("c1ccccc1", 5.0))
-    corpus.add(_entry("CCN", 2.5))
+def test_checkpoint_roundtrip():
+    corpus = Corpus(max_size=100)
+    for i in range(10):
+        corpus.add(CorpusEntry(smiles="C" * i + "CO", priority=float(i)))
 
-    first = corpus.pop()
-    assert first.smiles == "c1ccccc1"
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = f.name
 
+    try:
+        corpus.save(path)
+        corpus2 = Corpus()
+        corpus2.load(path)
+        assert corpus2.size() == corpus.size()
 
-def test_corpus_save_load_preserves_priority_order(tmp_path) -> None:
-    corpus = Corpus(max_size=10)
-    corpus.add(_entry("A", 1.0))
-    corpus.add(_entry("B", 7.0))
-    corpus.add(_entry("C", 3.0))
-
-    save_path = tmp_path / "corpus.json"
-    corpus.save(save_path)
-
-    loaded = Corpus()
-    loaded.load(save_path)
-
-    assert loaded.max_size == 10
-    assert loaded.size() == 3
-    assert [loaded.pop().smiles, loaded.pop().smiles, loaded.pop().smiles] == ["B", "C", "A"]
+        top_smiles_before = max(corpus._entries.values(), key=lambda e: e.priority).smiles
+        top_after = corpus2.pop()
+        assert top_after.smiles == top_smiles_before
+    finally:
+        os.unlink(path)
 
 
-def test_corpus_max_size_drops_lowest_priority() -> None:
-    corpus = Corpus(max_size=2)
-    corpus.add(_entry("low", 1.0))
-    corpus.add(_entry("high", 10.0))
-    corpus.add(_entry("mid", 5.0))
-
-    assert corpus.size() == 2
-    assert {corpus.pop().smiles, corpus.pop().smiles} == {"high", "mid"}
-
-
-def test_corpus_load_restores_none_max_size(tmp_path) -> None:
-    save_path = tmp_path / "corpus.json"
-    save_path.write_text('{"max_size": null, "entries": []}', encoding="utf-8")
-
-    corpus = Corpus(max_size=5)
-    corpus.load(save_path)
-
-    assert corpus.max_size is None
-
-
-def test_compute_priority_matches_spec_formula() -> None:
-    assert compute_priority(new_bits=2, affinity=-9.0, times_mutated=3) == pytest.approx(23.7)
-
-
-def test_compute_priority_weighted_uses_overrides() -> None:
-    score = compute_priority_weighted(
-        new_bits=3,
-        affinity=-8.0,
-        times_mutated=4,
-        priority_new_bit_weight=5.0,
-        priority_affinity_weight=2.0,
-        priority_reuse_penalty=0.25,
-    )
-    # (3 * 5.0) + ((8 - 5) * 2.0) - (4 * 0.25)
-    assert score == pytest.approx(20.0)
-
-
-def test_compute_priority_weighted_uses_novelty_score_when_present() -> None:
-    score = compute_priority_weighted(
-        new_bits=7,
-        novelty_score=2,
-        affinity=-8.0,
-        times_mutated=0,
-        priority_new_bit_weight=10.0,
-        priority_affinity_weight=1.0,
-        priority_reuse_penalty=0.1,
-    )
-
-    assert score == pytest.approx(23.0)
-
-
-def test_corpus_deduplicates_entries_by_smiles() -> None:
-    corpus = Corpus()
-    corpus.add(CorpusEntry(smiles="CCO", source_id="seed_1", priority=1.0, new_bits=1))
-    corpus.add(CorpusEntry(smiles="CCO", source_id="mutant_of:seed_1", priority=7.5, best_affinity=-9.1))
+def test_dedup_by_canonical_smiles_merges_stats():
+    corpus = Corpus(max_size=100)
+    corpus.add("c1ccccc1", novelty=1, affinity=-8.0)
+    corpus.add("c1ccccc1", novelty=2, affinity=-9.5)  # same molecule, better stats
 
     assert corpus.size() == 1
-    entry = corpus.pop()
-    assert entry.smiles == "CCO"
-    assert entry.priority == pytest.approx(7.5)
-    assert entry.new_bits == 1
-    assert entry.best_affinity == pytest.approx(-9.1)
+    entry = next(iter(corpus._entries.values()))
+    assert entry.novelty_score == 2  # max
+    assert entry.best_affinity == -9.5  # more negative wins
 
 
-def test_power_schedule_increases_budget_for_interesting_entries() -> None:
-    boring = CorpusEntry(smiles="CCO", source_id="seed", priority=1.0)
-    interesting = CorpusEntry(
-        smiles="CCN",
-        source_id="seed",
-        priority=15.0,
-        best_affinity=-10.5,
-        new_bits=3,
-        finds=1,
+def test_favored_entries_immune_to_eviction():
+    corpus = Corpus(max_size=5)
+    for i in range(4):
+        corpus.add(CorpusEntry(smiles="C" * i + "CO", priority=1.0))
+
+    favored_entry = CorpusEntry(smiles="c1ccccc1", priority=0.1, favored=True)
+    corpus.add(favored_entry)
+
+    for i in range(4, 10):
+        corpus.add(CorpusEntry(smiles="C" * i + "CO", priority=100.0))
+
+    assert corpus.size() <= 5
+    assert "c1ccccc1" in corpus._entries  # never evicted despite lowest priority
+
+
+def test_power_schedule_scales_budget_for_interesting_entries():
+    from biofuzz.corpus import compute_power_score, mutation_budget
+
+    strong_entry = CorpusEntry(smiles="CCO", novelty_score=2, best_affinity=-12.0, finds=1)
+    weak_entry = CorpusEntry(smiles="CCC", novelty_score=0, best_affinity=None)
+
+    assert compute_power_score(strong_entry) > compute_power_score(weak_entry)
+    assert mutation_budget(strong_entry, base_mutations=20) > mutation_budget(
+        weak_entry, base_mutations=20
     )
 
-    boring_power, boring_budget = compute_mutation_budget(boring, 20)
-    interesting_power, interesting_budget = compute_mutation_budget(interesting, 20)
 
-    assert interesting_power > compute_power_score(boring)
-    assert interesting_budget > boring_budget
+def test_priority_formula_rewards_favored_and_finds():
+    from biofuzz.corpus import compute_priority
+
+    base = CorpusEntry(smiles="CCO")
+    favored = CorpusEntry(smiles="CCO", favored=True)
+    with_finds = CorpusEntry(smiles="CCO", finds=2)
+
+    base_priority = compute_priority(base)
+    assert compute_priority(favored) > base_priority
+    assert compute_priority(with_finds) > base_priority
 
 
-def test_power_schedule_prefers_hashed_novelty_score_when_available() -> None:
-    legacy_only = CorpusEntry(
-        smiles="CCO",
-        source_id="seed",
-        priority=1.0,
-        new_bits=5,
-    )
-    hashed = CorpusEntry(
-        smiles="CCN",
-        source_id="seed",
-        priority=1.0,
-        new_bits=5,
-        novelty_score=1,
-    )
-
-    assert compute_power_score(legacy_only) > compute_power_score(hashed)
+def test_mutation_lineage_bounded_depth():
+    entry = CorpusEntry(smiles="CCO", mutation_lineage=[f"op{i}" for i in range(15)])
+    assert len(entry.mutation_lineage) == 10

@@ -1,190 +1,163 @@
-from pathlib import Path
-import json
+import os
+import tempfile
 
-import pytest
-
-from biofuzz.core.coverage import CoverageMap, validate_coverage_settings
-from biofuzz.docking.config import PocketConfig
-from biofuzz.docking.parser import PoseAtom
-from biofuzz.protein.pocket import compute_fingerprint
-from biofuzz.protein.residues import parse_protein_residues
+from biofuzz.coverage import CoverageMap
 
 
-def test_coverage_update_and_persistence(tmp_path: Path) -> None:
-    protein_residues = {
-        "A:8": [(0.0, 0.0, 0.0)],
-        "A:23": [(5.0, 5.0, 5.0)],
-        "A:25": [(9.0, 9.0, 9.0)],
-    }
-    pocket = PocketConfig(residue_ids={"A:8", "A:23", "A:25"}, contact_cutoff=3.5)
+def test_novelty_classification_and_dedup():
+    cov = CoverageMap(
+        pocket_residue_ids={"A:25", "A:27", "A:50"},
+        map_size_bytes=1024,
+        occupancy_rotate_threshold=0.8,
+    )
 
-    atoms_a = [PoseAtom("C1", 0.5, 0.2, 0.1, 0.0, "C")]
-    atoms_b = [PoseAtom("C1", 5.2, 5.1, 5.0, 0.0, "C")]
+    fp1 = frozenset({"A:25", "A:27"})
+    fp2 = frozenset({"A:25", "A:50"})  # different fingerprint
+    fp3 = frozenset({"A:25", "A:27"})  # same as fp1
 
-    fp1 = compute_fingerprint(atoms_a, protein_residues, pocket)
-    fp2 = compute_fingerprint(atoms_b, protein_residues, pocket)
-
-    cov = CoverageMap(pocket.residue_ids)
     obs1 = cov.observe(fp1)
-    obs2 = cov.observe(fp2)
-    obs3 = cov.observe(fp1)
-
     assert obs1.novelty_class == "strong"
-    assert obs2.novelty_class in {"strong", "weak", "none"}
-    assert obs3.novelty_class == "none"
+    assert obs1.novelty_score == 2
 
-    save_path = tmp_path / "coverage.json"
-    cov.save(save_path)
+    obs2 = cov.observe(fp2)
+    assert obs2.novelty_class == "strong"  # different slot
+    assert obs2.hash_slot != obs1.hash_slot
 
-    loaded = CoverageMap(set())
-    loaded.load(save_path)
-    assert loaded.pocket_residue_ids == cov.pocket_residue_ids
-    assert loaded.current_map == cov.current_map
-    assert loaded.previous_map == cov.previous_map
+    obs3 = cov.observe(fp3)
+    assert obs3.novelty_class == "none"  # fp1's slot already in current
 
 
-def test_coverage_mapping_and_hash_are_stable_for_same_pocket() -> None:
-    cov_a = CoverageMap({"A:25", "A:8", "A:23"}, map_size_bytes=1024)
-    cov_b = CoverageMap({"A:8", "A:23", "A:25"}, map_size_bytes=1024)
+def test_epoch_rotation_and_weak_novelty():
+    # Doc's own build-criterion numbers (map_size_bytes=1024,
+    # occupancy_rotate_threshold=0.01) can never trigger rotation from a
+    # single observation (1/1024 ~= 0.098% < 1%) -- using a small map and a
+    # threshold reachable by one hit instead, same semantics.
+    cov = CoverageMap(
+        pocket_residue_ids={"A:25", "A:27", "A:50"},
+        map_size_bytes=8,
+        occupancy_rotate_threshold=0.1,
+    )
+    fp1 = frozenset({"A:25", "A:27"})
 
-    assert cov_a.residue_to_bit_index == {"A:8": 0, "A:23": 1, "A:25": 2}
-    assert cov_a.residue_to_bit_index == cov_b.residue_to_bit_index
-
-    fingerprint = frozenset({"A:8", "A:25"})
-    valid_a, mask_a = cov_a.fingerprint_to_mask(fingerprint)
-    valid_b, mask_b = cov_b.fingerprint_to_mask(fingerprint)
-
-    assert valid_a == fingerprint
-    assert valid_b == fingerprint
-    assert mask_a == mask_b
-    assert cov_a.hash_mask(mask_a) == cov_b.hash_mask(mask_b)
-
-
-def test_coverage_observe_classifies_strong_weak_and_none() -> None:
-    cov = CoverageMap({"A:8", "A:23", "A:25"}, map_size_bytes=1024)
-
-    strong = cov.observe(frozenset({"A:8", "A:25"}))
-    cov._rotate_epoch()
-    weak = cov.observe(frozenset({"A:8", "A:25"}))
-    none = cov.observe(frozenset({"A:8", "A:25"}))
-
-    assert strong.novelty_class == "strong"
-    assert strong.novelty_score == 2
-    assert weak.novelty_class == "weak"
-    assert weak.novelty_score == 1
-    assert none.novelty_class == "none"
-    assert none.novelty_score == 0
-    assert cov.novelty_counts() == {"strong": 1, "weak": 1, "none": 1}
-
-
-def test_coverage_rotates_epoch_when_occupancy_threshold_is_crossed() -> None:
-    cov = CoverageMap({"A:8"}, map_size_bytes=1024, occupancy_rotate_threshold=0.1)
-    valid_fingerprint, mask = cov.fingerprint_to_mask(frozenset({"A:8"}))
-    hash_index = cov.hash_mask(mask)
-    threshold_count = int(cov.map_size_bytes * cov.occupancy_rotate_threshold) + 1
-    for offset in range(threshold_count - 1):
-        cov.current_map[(hash_index + offset + 1) % cov.map_size_bytes] = 1
-    cov.current_nonzero_count = threshold_count - 1
-
-    observation = cov.observe(valid_fingerprint)
-
-    assert observation.rotated is True
-    assert observation.epoch == 1
+    obs = cov.observe(fp1)  # 1/8 = 12.5% >= 10% -> triggers rotation
+    assert obs.rotated
     assert cov.epoch == 1
-    assert cov.bitmap_occupancy() == 0.0
-    assert cov.previous_map[hash_index] == 1
+
+    obs2 = cov.observe(fp1)
+    assert obs2.novelty_class == "weak"  # fp1 in previous, not current
 
 
-def test_coverage_loads_legacy_union_only_checkpoint(tmp_path: Path) -> None:
-    save_path = tmp_path / "coverage_legacy.json"
-    save_path.write_text(
-        json.dumps(
-            {
-                "pocket_residue_ids": [8, 23, 25],
-                "global_coverage": [8, 25],
-            }
-        ),
-        encoding="utf-8",
+def test_checkpoint_roundtrip():
+    cov = CoverageMap(
+        pocket_residue_ids={"A:25", "A:27", "A:50"},
+        map_size_bytes=1024,
     )
+    cov.observe(frozenset({"A:25", "A:27"}))
+    cov.observe(frozenset({"A:25", "A:50"}))
 
-    cov = CoverageMap({"A:8", "A:23", "A:25"})
-    cov.load(save_path)
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = f.name
 
-    assert cov.pocket_residue_ids == {"A:8", "A:23", "A:25"}
-    assert cov.epoch == 0
-    assert cov.novelty_counts() == {"strong": 0, "weak": 0, "none": 0}
+    try:
+        cov.save(path)
+        cov_loaded = CoverageMap(
+            pocket_residue_ids={"A:25", "A:27", "A:50"}, map_size_bytes=1024
+        )
+        cov_loaded.load(path)
+        assert cov_loaded.epoch == cov.epoch
+        assert cov_loaded.strong_novelty_count == cov.strong_novelty_count
+    finally:
+        os.unlink(path)
 
 
-def test_coverage_rejects_ambiguous_legacy_checkpoint_on_multimeric_pocket(
-    tmp_path: Path,
-) -> None:
-    save_path = tmp_path / "coverage_legacy_multimer.json"
-    save_path.write_text(
-        json.dumps(
-            {
-                "pocket_residue_ids": [42],
-                "global_coverage": [42],
-            }
-        ),
-        encoding="utf-8",
+def test_checkpoint_version_mismatch_rejected():
+    import json
+
+    cov = CoverageMap(pocket_residue_ids={"A:25"}, map_size_bytes=1024)
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = f.name
+    try:
+        cov.save(path)
+        data = json.loads(open(path).read())
+        data["version"] = 1
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+
+        from biofuzz.storage.checkpoint import CheckpointVersionError
+
+        cov2 = CoverageMap(pocket_residue_ids={"A:25"}, map_size_bytes=1024)
+        try:
+            cov2.load(path)
+            assert False, "expected CheckpointVersionError"
+        except CheckpointVersionError:
+            pass
+    finally:
+        os.unlink(path)
+
+
+def test_map_size_must_be_power_of_two():
+    import pytest
+
+    with pytest.raises(ValueError):
+        CoverageMap(pocket_residue_ids={"A:25"}, map_size_bytes=1000)
+
+
+def test_bucketed_hit_frequency_grows_with_repeats():
+    cov = CoverageMap(
+        pocket_residue_ids={"A:25", "A:27"},
+        map_size_bytes=1024,
+        occupancy_rotate_threshold=1.0,
     )
-
-    cov = CoverageMap({"A:42", "B:42"})
-
-    with pytest.raises(ValueError, match="multiple chain-aware target residues"):
-        cov.load(save_path)
-
-
-def test_validate_coverage_settings_rejects_invalid_values() -> None:
-    with pytest.raises(ValueError, match="power of two"):
-        validate_coverage_settings(map_size_bytes=250 * 1024, occupancy_rotate_threshold=0.55)
-
-    with pytest.raises(ValueError, match="between 0.1 and 0.95"):
-        validate_coverage_settings(map_size_bytes=1024, occupancy_rotate_threshold=0.01)
+    fp = frozenset({"A:25"})
+    obs = None
+    for _ in range(5):
+        obs = cov.observe(fp)
+    # 5 cumulative hits on the same slot -> bucket 4 (4-7 range)
+    assert obs.bitmap_slot_byte == 4
 
 
-def test_coverage_ignores_residues_outside_defined_pocket() -> None:
-    cov = CoverageMap({"A:8", "A:23", "A:25"})
-    observation = cov.observe(frozenset({"A:8", "A:99"}))
-
-    assert observation.fingerprint == frozenset({"A:8"})
-    assert observation.novelty_class == "strong"
-
-
-def test_compute_fingerprint_ignores_hydrogen_only_contacts() -> None:
-    protein_residues = {"A:8": [(0.0, 0.0, 0.0)]}
-    pocket = PocketConfig(residue_ids={"A:8"}, contact_cutoff=3.5)
-    atoms = [
-        PoseAtom("H1", 0.1, 0.1, 0.1, 0.0, "HD"),
-        PoseAtom("C1", 10.0, 10.0, 10.0, 0.0, "C"),
-    ]
-
-    assert compute_fingerprint(atoms, protein_residues, pocket) == frozenset()
+def test_interaction_types_extend_fingerprint_bit_space():
+    cov_plain = CoverageMap(pocket_residue_ids={"A:25"}, map_size_bytes=1024)
+    cov_typed = CoverageMap(
+        pocket_residue_ids={"A:25"}, map_size_bytes=1024, interaction_types_enabled=True
+    )
+    assert len(cov_plain.residue_to_bit_index) == 1
+    assert len(cov_typed.residue_to_bit_index) == 4
 
 
-def test_compute_fingerprint_distinguishes_same_residue_number_across_chains() -> None:
-    protein_residues = {
-        "A:42": [(0.0, 0.0, 0.0)],
-        "B:42": [(10.0, 10.0, 10.0)],
+def test_observe_with_real_pose_and_receptor_contacts():
+    from biofuzz.docker import DockingConfig
+    from biofuzz.docker.gnina import GninaBackend
+    from biofuzz.docker.parser import parse_pose
+    from biofuzz.protein import parse_receptor_residues
+
+    pocket_residue_ids = {
+        "A:25", "A:27", "A:28", "A:29", "A:30", "A:32", "A:48", "A:49", "A:50",
+        "B:25", "B:27", "B:28", "B:29", "B:30", "B:32", "B:48", "B:49", "B:50",
     }
-    pocket = PocketConfig(residue_ids={"A:42", "B:42"}, contact_cutoff=3.5)
 
-    atoms_a = [PoseAtom("C1", 0.1, 0.1, 0.1, 0.0, "C")]
-    atoms_b = [PoseAtom("C1", 10.1, 10.1, 10.1, 0.0, "C")]
-
-    fingerprint_a = compute_fingerprint(atoms_a, protein_residues, pocket)
-    fingerprint_b = compute_fingerprint(atoms_b, protein_residues, pocket)
-    cov = CoverageMap(pocket.residue_ids)
-
-    assert fingerprint_a == frozenset({"A:42"})
-    assert fingerprint_b == frozenset({"B:42"})
-    assert cov.fingerprint_to_mask(fingerprint_a)[1] != cov.fingerprint_to_mask(fingerprint_b)[1]
-
-
-def test_parse_protein_residues_skips_receptor_hydrogens() -> None:
-    pdbqt = (
-        "ATOM      1  H1  MET A   8       0.000   0.000   0.000  0.00  0.00  0.000 HD\n"
-        "ATOM      2  CA  MET A   8       1.000   1.000   1.000  0.00  0.00  0.000 C\n"
+    backend = GninaBackend()
+    config = DockingConfig(
+        receptor_path="targets/hiv_protease/protein.pdbqt",
+        center_x=13.073, center_y=22.467, center_z=5.557,
+        size_x=20.0, size_y=20.0, size_z=20.0,
+        exhaustiveness=4, num_modes=1, timeout_seconds=120,
     )
+    ligand_pdbqt = open("targets/hiv_protease/reference_ligands/indinavir.pdbqt").read()
+    result = backend.dock(ligand_pdbqt, config)
+    assert result.success
 
-    assert parse_protein_residues(pdbqt) == {"A:8": [(1.0, 1.0, 1.0)]}
+    try:
+        pose_atoms = parse_pose(open(result.pose_path).read())
+        protein_residues = parse_receptor_residues(
+            "targets/hiv_protease/protein.pdbqt", residue_ids=pocket_residue_ids
+        )
+
+        cov = CoverageMap(pocket_residue_ids=pocket_residue_ids, map_size_bytes=4096)
+        obs = cov.observe(pose_atoms, protein_residues, smiles="indinavir")
+
+        assert len(obs.fingerprint) > 0  # indinavir should contact the active site
+        assert obs.novelty_class == "strong"
+        assert cov.pioneer_for(obs.hash_slot) == "indinavir"
+    finally:
+        os.unlink(result.pose_path)

@@ -1,0 +1,36 @@
+name: parp1
+receptor: protein.pdbqt
+
+box:
+  center_x: 2.314
+  center_y: 63.631
+  center_z: 188.326
+  size_x: 18.222
+  size_y: 18.0
+  size_z: 18.0
+
+pocket:
+  contact_cutoff: 3.5
+  residue_ids:
+    - "A:759"
+    - "A:763"
+    - "A:861"
+    - "A:862"
+    - "A:863"
+    - "A:888"
+    - "A:889"
+    - "A:894"
+    - "A:895"
+    - "A:896"
+    - "A:897"
+    - "A:898"
+    - "A:903"
+    - "A:904"
+    - "A:907"
+    - "A:987"
+    - "A:988"
+
+# Reference: Talazoparib, ~-12.2 kcal/mol
+oracle:
+  affinity_threshold: -11.0
+  strain_threshold: 3.5
