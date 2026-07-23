@@ -9,20 +9,44 @@ def test_load_global_config():
     assert config["docking"]["engine"] == "gnina"
 
 
-def test_load_target_config():
+def test_target_config_has_no_reference_derived_oracle_threshold():
     config = load_target_config("hiv_protease")
     assert config["name"] == "hiv_protease"
-    assert config["oracle"]["affinity_threshold"] == -10.0
+    # No target ships its own affinity_threshold any more: thresholds used to be
+    # calibrated from where the known inhibitor docks, and that reliance is gone.
+    # A target inherits the reference-free global oracle instead.
+    assert "affinity_threshold" not in config.get("oracle", {})
     assert len(config["pocket"]["residue_ids"]) > 0
 
 
-def test_merge_defaults_applies_global_docking_and_target_oracle():
+def test_merge_defaults_gives_targets_the_global_reference_free_oracle():
     global_config = load_global_config("config.yaml")
     target_config = load_target_config("egfr_kinase")
     merged = merge_defaults(global_config, target_config)
-    assert merged["oracle"]["affinity_threshold"] == -7.0
+    # With no per-target oracle override, the target inherits the global oracle
+    # wholesale -- the same reference-free threshold and tiers for every target.
+    assert (
+        merged["oracle"]["affinity_threshold"]
+        == global_config["oracle"]["affinity_threshold"]
+    )
     assert merged["oracle"]["strain_threshold"] == 3.5  # inherited from global
     assert merged["docking"]["engine"] == "gnina"
+    # Global-only oracle tiers still reach the target.
+    assert "scoring_policy" in merged["oracle"]
+    assert "min_ligand_efficiency" in merged["oracle"]
+
+
+def test_merge_defaults_preserves_per_target_docking_override():
+    """A target's own docking settings must not be discarded.
+
+    merge_defaults used to assign `docking` straight from the global config,
+    silently dropping any per-target override.
+    """
+    global_config = {"docking": {"engine": "gnina", "exhaustiveness_fuzz": 8}}
+    target_config = {"docking": {"exhaustiveness_fuzz": 32}}
+    merged = merge_defaults(global_config, target_config)
+    assert merged["docking"]["exhaustiveness_fuzz"] == 32  # target wins
+    assert merged["docking"]["engine"] == "gnina"  # global fills the gap
 
 
 def test_runtime_status_constructible_with_minimal_fields():

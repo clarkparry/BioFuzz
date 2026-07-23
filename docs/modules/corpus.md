@@ -36,7 +36,13 @@ CorpusEntry:
   novelty_score: int           # strongest novelty class seen: 2=strong, 1=weak, 0=none
   finds: int                   # number of hits produced by mutants of this entry
   favored: bool                # uniquely covers at least one bitmap bucket
-  priority: float              # current scheduler score (recomputed on pop)
+  priority: float              # effective queue score = base_priority - crowding
+                               #   (derived by Corpus; recomputed on pop)
+  base_priority: float | None  # intrinsic worth: seed prior, or evidence once docked
+  scaffold: str                # Bemis-Murcko scaffold (crowding key)
+  rarity: float                # mean contact rarity of the best pose
+  ligand_efficiency: float | None
+  calibrated: bool             # True once the molecule ITSELF has been docked
 ```
 
 `mutation_lineage` is a bounded list (max depth ~10) of the mutation type names used to produce this entry from its ancestor. This allows post-run analysis of which mutation operations are productive without the lineage string growing unbounded.
@@ -45,25 +51,57 @@ CorpusEntry:
 
 ## Priority Formula
 
-Priority is recomputed when an entry is scored or popped, not stored as a stable value. The formula follows AFLFast's exponential decay model adapted for chemistry:
+Priority splits in two. **Base priority** is an entry's intrinsic worth from its
+own evidence. **Effective priority** is what the queue orders on: base, discounted
+by how crowded the entry's scaffold is.
 
 ```
+# base_priority -- depends only on this entry
 coverage_signal = novelty_score   (strong=2, weak=1, none=0)
 affinity_bonus  = max(0, -affinity - 5.0)    # reward for < -5.0 kcal/mol
-find_bonus      = finds * 5.0                # reward for historically productive entries
-reuse_penalty   = times_fuzzed * 0.1        # mild decay to prevent monopolization
-favored_bonus   = 20.0 if favored else 0.0  # AFL++-style favored boost
+rarity_bonus    = rarity * RARITY_WEIGHT     # under-explored contacts
+find_bonus      = finds * 5.0                # historically productive entries
+reuse_penalty   = times_fuzzed * 1.0         # decay to prevent monopolization
+favored_bonus   = 20.0 if favored else 0.0   # AFL++-style favored boost
 
-priority = max(0.1,
+base_priority = max(0.1,
     coverage_signal * NOVELTY_WEIGHT
     + affinity_bonus * AFFINITY_WEIGHT
+    + rarity_bonus
     + find_bonus
     - reuse_penalty
     + favored_bonus
 )
+
+# effective priority -- depends on the rest of the corpus
+crowding = min(12.0, SCAFFOLD_PENALTY_WEIGHT * log2(n_sharing_scaffold))
+priority = max(0.1, base_priority - crowding)
 ```
 
-`NOVELTY_WEIGHT` and `AFFINITY_WEIGHT` are configurable (config.yaml). This formula should be tunable without changing module code.
+`NOVELTY_WEIGHT`, `AFFINITY_WEIGHT` and `SCAFFOLD_PENALTY_WEIGHT` are configurable
+(config.yaml). The formula is tunable without changing module code.
+
+**Why the split.** Crowding depends on *other* entries and keeps changing after
+an entry is queued, so it cannot be baked into a stored score. Folding it into
+`base_priority` and recomputing at pop destroys seed priors: an uncalibrated seed
+has no evidence of its own, so recomputation floors it at 0.1 and the entire seed
+ordering is lost. Seed priors therefore live in `base_priority`, and only the
+crowding term is re-derived.
+
+**Why crowding at all.** Every mutant of a good molecule is itself a good
+molecule, so without a diversity term the queue collapses onto one chemical
+series — 251 approved drugs went in and one 2-hour campaign explored essentially
+one of them, returning ten hits from a single scaffold. Log scaling keeps the
+first few analogs of a promising series cheap; the cap demotes a runaway series
+without exiling it. See `docs/evaluation_2026-07.md` §B2.
+
+**Reuse penalty was 0.1**, against a novelty weight of 10 — an entry had to be
+fuzzed 200 times before it fell behind a fresh sibling of equal novelty. It is
+now 1.0.
+
+`pop()` re-derives the crowding term and re-queues if it has grown, so `add()`
+stays O(log n). Heap records are versioned so exactly one is live per molecule:
+without that, repricing either loses entries from the heap or duplicates them.
 
 ---
 

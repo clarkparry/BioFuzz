@@ -123,8 +123,32 @@ Filter checks:
 - Rotatable bonds ≤ max_rot_bonds
 - Connected graph (no disconnected fragments)
 - RDKit `SanitizeMol` passes
+- **No unstable motif** (`check_stability=True`, see `mutator/alerts.py`)
 
 Failed candidates are discarded. The mutator keeps attempting until it fills the budget or exhausts `max_attempts = max(50, n * 20)`.
+
+### Chemical plausibility is not a property bound
+
+Property bounds say nothing about whether a molecule can exist. `atom_scan`
+walking an ethoxy tail one atom at a time produces `-O-N(H)-O-` and `-O-CH2-O-H`
+— a hydroxylamine ether and a hemiacetal — which pass every check above, dock
+well, and become findings. Nine of ten findings in one campaign carried such a
+motif. `mutator/alerts.py` is the gate for this, and it is deliberately narrow:
+it targets *unstable* motifs, not merely unattractive ones. RDKit's BRENK catalog
+was tried and rejected for the in-loop gate — it flags aspirin and every aniline.
+PAINS/BRENK belong in triage, where a flag is advisory. See
+`docs/evaluation_2026-07.md` §D1.
+
+### Bounds are per-target, and they must admit the target's own drug
+
+Filter parameters come from the caller (`molecules:` in config, overlaid
+per-target). **Set them from the target's known chemistry.** A global 550 Da /
+logP 5.0 envelope rejects indinavir (614 Da) and vemurafenib (logP 5.54) — two of
+five bundled reference drugs — at the preparation step, silently, which excludes
+the entire chemical class that works on those targets. Ligand efficiency, not a
+blanket MW cap, is the instrument for keeping size honest: it asks what the extra
+atoms buy. `tests/test_calibration.py` asserts every target can prepare its own
+reference drug. See `docs/evaluation_2026-07.md` §D2.
 
 ---
 

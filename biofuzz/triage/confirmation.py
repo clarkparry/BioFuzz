@@ -5,7 +5,7 @@ import os
 from biofuzz.docker import DockingConfig
 from biofuzz.docker.gnina import GninaBackend
 from biofuzz.docker.parser import parse_all_poses, parse_log
-from biofuzz.oracle import extract_strain
+from biofuzz.oracle import best_mode, extract_strain
 from biofuzz.prep import prepare_smiles
 from biofuzz.triage.record import TriageRecord, TriageStageResult
 
@@ -34,12 +34,16 @@ class ConfirmationDockingStage:
     def __init__(
         self,
         exhaustiveness: int = 16,
-        timeout_seconds: int = 300,
+        timeout_seconds: int = 900,
         cnn_model: str | None = None,
+        scoring_policy: str = "consensus",
+        affinity_mismatch_tolerance: float = 1.5,
     ):
         self.exhaustiveness = exhaustiveness
         self.timeout_seconds = timeout_seconds
         self.cnn_model = cnn_model
+        self.scoring_policy = scoring_policy
+        self.affinity_mismatch_tolerance = affinity_mismatch_tolerance
 
     def analyze(self, record: TriageRecord, target_config: dict, **kwargs) -> TriageStageResult:
         pdbqt = prepare_smiles(record.smiles, **DEFAULT_FILTER_KWARGS)
@@ -67,15 +71,22 @@ class ConfirmationDockingStage:
             if not modes:
                 return TriageStageResult(fields={}, filter_failed="confirmation_dock_failed")
 
-            confirmed_affinity = modes[0].affinity
+            _mode, scored = best_mode(modes, self.scoring_policy)
+            if scored is None:
+                return TriageStageResult(fields={}, filter_failed="confirmation_dock_failed")
+            confirmed_affinity = scored.score
 
             pose_text = open(result.pose_path).read()
             poses = parse_all_poses(pose_text)
             rmsd_spread = _rmsd(poses[0], poses[1]) if len(poses) > 1 else 0.0
-            strain = extract_strain(pose_text)
+            # Prefer the table's intramolecular energy over a pose REMARK gnina
+            # never writes (see biofuzz/oracle/oracle.py).
+            strain = scored.intramol
+            if strain is None:
+                strain = extract_strain(pose_text)
 
             filter_failed = None
-            if abs(confirmed_affinity - record.initial_affinity) > 1.5:
+            if abs(confirmed_affinity - record.initial_affinity) > self.affinity_mismatch_tolerance:
                 filter_failed = "confirmation_affinity_mismatch"
 
             return TriageStageResult(
@@ -83,6 +94,10 @@ class ConfirmationDockingStage:
                     confirmed_affinity=confirmed_affinity,
                     pose_rmsd_spread=rmsd_spread,
                     strain=strain,
+                    vina_affinity=scored.vina_affinity,
+                    cnn_affinity_kcal=scored.cnn_affinity_kcal,
+                    cnn_pose_score=scored.cnn_pose_score,
+                    score_disagreement=scored.disagreement,
                 ),
                 filter_failed=filter_failed,
             )

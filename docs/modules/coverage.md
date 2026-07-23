@@ -2,7 +2,26 @@
 
 **AFL++ analog:** `__afl_area_ptr` edge coverage bitmap + novelty classification
 
-The coverage module answers the most important question in the fuzzer: "Has this molecule shown us something new?" It converts a docked pose into a residue-contact fingerprint, hashes that fingerprint into a fixed-size bitmap, and classifies novelty using a two-epoch sliding window. Coverage is the primary feedback signal that drives the entire mutation strategy.
+The coverage module answers the most important question in the fuzzer: "Has this molecule shown us something new?" It converts a docked pose into a residue-contact fingerprint and classifies novelty. Coverage is the primary feedback signal that drives the entire mutation strategy.
+
+**Two maps, two signals.** This is the part that has to be right:
+
+- **Union map** — one byte per pocket contact bit, indexed by residue (not by
+  hash), and **never reset**. Setting a byte that was zero means this pose
+  reached a contact no pose in the campaign had reached. This is the direct
+  analog of AFL++ discovering a new edge, and it is the signal that decays as the
+  pocket gets explored.
+- **Combination map** — the whole fingerprint hashed to a single slot, tracking
+  distinct *binding modes* rather than distinct contacts, under a two-epoch
+  sliding window.
+
+The combination map alone is not a usable novelty signal, and BioFuzz originally
+had only that. A 256 KiB map holds 262,144 slots, so nearly every distinct pose
+hashes somewhere unseen and scores `strong` — novelty pinned at maximum is
+information-free, and it flattened the one term the scheduler needed to tell
+entries apart. It also gives no partial credit: `{A,B,C}` and `{A,B,C,D}` land in
+unrelated slots, so "reached a residue nothing had reached before" was
+inexpressible. See `docs/evaluation_2026-07.md` §C1.
 
 ---
 
@@ -11,23 +30,33 @@ The coverage module answers the most important question in the fuzzer: "Has this
 **Does:**
 - Accept pose atoms + protein residue coordinates → residue contact fingerprint
 - Optionally extend fingerprint with per-residue interaction type bits
-- Hash fingerprint to a bitmap slot using a deterministic mixing function
-- Classify novelty: strong / weak / none (two-epoch sliding window)
+- Track a never-reset union map of contacts ever reached, and count new bits
+- Hash fingerprint to a combination-map slot using a deterministic mixing function
+- Classify novelty: strong / weak / none
+- Score contact rarity, a signal that does not saturate
 - Store log2-bucketed hit frequency per slot (AFL++ byte model)
-- Track per-slot pioneer entries for favored-entry marking
+- Track pioneer entries per slot and per union bit
 - Save/load checkpoint including full bitmap state
 
 **Does not:**
 - Parse PDBQT files (Docker/Parser module)
 - Store corpus entries (Corpus module)
 - Make hit/no-hit decisions (Oracle module)
-- Know what molecule produced a fingerprint
+- Know what molecule produced a fingerprint (beyond crediting pioneers)
 
 ---
 
 ## Fingerprint Construction
 
 A fingerprint is a frozenset of contacted pocket residue IDs, optionally qualified with interaction type suffixes.
+
+> **The pocket residue set is ligand-free.** The residue IDs the fingerprint is
+> built over come from `pocket.residue_ids` in the target config, which is
+> produced by a pocket detector (P2Rank) run on the apo receptor — not from
+> residues near a co-crystallised inhibitor. So the coverage map, like the
+> docking box, is a property of the protein and carries no dependency on a known
+> binder. Changing the detected residue set changes which contacts are
+> observable; it does not change any of the mechanics below.
 
 ### Step 1: Contact Detection
 
@@ -51,9 +80,24 @@ When interaction typing is enabled, each contact can contribute up to 3 bits to 
 
 Map the pocket residue IDs to a stable local bit order (lexicographically sorted chain-qualified IDs). Convert the fingerprint frozenset to an integer bitmask. This integer is the canonical fingerprint representation.
 
-### Step 4: Hash to Bitmap Slot
+### Step 4a: Update the Union Map
 
-Mix the bitmask with splitmix64 to produce a bitmap slot index in `[0, map_size_bytes)`. The map size must be a power of two (required for the modulo-equivalent `& (size - 1)` masking).
+For each fingerprint element, look up its bit in `residue_to_bit_index` and set
+that byte in the never-reset `union` map. Count how many were previously zero:
+that is `new_bits`, the new-edge signal.
+
+Also accumulate **rarity** — the mean of `1/(1 + prior_hits)` over the pose's
+bits, measured *before* this pose's own contribution so a pose is never made to
+look less novel by its own contacts. Unlike `new_bits`, rarity never saturates:
+once every residue has been touched at least once, `new_bits` is permanently 0
+for the rest of the campaign, while rarity keeps distinguishing well-trodden
+contacts from lightly explored ones.
+
+### Step 4b: Hash to a Combination Slot
+
+Mix the bitmask with splitmix64 to produce a combination-map slot index in
+`[0, map_size_bytes)`. The map size must be a power of two (required for the
+modulo-equivalent `& (size - 1)` masking).
 
 The hash function is part of the module's stable interface. If the implementation changes, all existing checkpoints become invalid and must be discarded.
 
@@ -61,15 +105,21 @@ The hash function is part of the module's stable interface. If the implementatio
 
 ## Novelty Classification
 
-Two bitmaps are maintained: `current` (this epoch) and `previous` (last epoch). Each slot stores one byte.
+Three maps: `union` (never reset), plus `current` (this epoch) and `previous`
+(last epoch) for the combination hash. Each slot stores one byte.
 
 **Novelty class for an observation:**
-- Slot absent from both maps → `strong` (score 2)
-- Slot absent from `current` but present in `previous` → `weak` (score 1)
-- Slot present in `current` → `none` (score 0)
+- `new_bits > 0` — reached a contact never reached before → `strong` (score 2)
+- Otherwise, combination slot absent from `current` → `weak` (score 1)
+- Otherwise → `none` (score 0)
+
+`strong` is defined by the *union* map, not the combination map. That is what
+makes it mean "we learned something about this pocket" rather than "this pose
+differed from previous poses", and what lets it decay honestly as the pocket
+fills.
 
 After classifying:
-1. If `strong` or `weak`: mark the slot in `current` and update the byte with log2-bucketed hit frequency
+1. Mark the slot in `current` and update the byte with log2-bucketed hit frequency
 2. Increment the novelty counter for this class
 3. If `bitmap_occupancy() ≥ occupancy_rotate_threshold`: rotate epoch (swap maps, clear current)
 
@@ -102,6 +152,28 @@ When `bitmap_occupancy()` (fraction of non-zero slots) reaches `occupancy_rotate
 - `epoch` counter incremented
 
 This prevents long campaigns from saturating the bitmap so that everything becomes `none` novelty. The two-epoch window ensures that patterns seen in the previous epoch produce `weak` novelty (still some signal) rather than no signal at all.
+
+**Only the combination map rotates.** The union map is the campaign's memory of
+which contacts have ever been reached; clearing it would make an already-explored
+pocket look novel again and re-trigger `strong` on contacts that are old news.
+
+**Rotation is largely theoretical at CPU docking speeds.** 0.55 occupancy of a
+256 KiB map needs ~144,000 distinct binding modes. A real 2-hour campaign reports
+`occupancy = 0.000`. This is not a bug — it is why the union map exists, and why
+`union_coverage()` rather than `bitmap_occupancy()` is the number to watch.
+
+---
+
+## Reporting
+
+| Metric | Meaning | Typical |
+|---|---|---|
+| `union_coverage()` | fraction of pocket contacts ever reached | **0.604** (29/48) after 2 iterations on hiv_protease |
+| `bitmap_occupancy()` | fraction of combination hash space used | ~0.000 — sparse by construction |
+| `unreached_bits()` | pocket contacts nothing has reached: the frontier | — |
+
+`union_coverage` is the interpretable one, and the one surfaced in `RuntimeStatus`
+and the checkpoint log. `bitmap_occupancy` only drives epoch rotation.
 
 ---
 

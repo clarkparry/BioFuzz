@@ -1,25 +1,35 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from biofuzz.corpus import Corpus, CorpusEntry
 from biofuzz.corpus import mutation_budget as compute_mutation_budget
+from biofuzz.corpus import select_stage
 from biofuzz.coverage import CoverageMap
 from biofuzz.docker import DockingConfig
 from biofuzz.docker.gnina import GninaBackend
 from biofuzz.docker.parser import parse_log, parse_pose
 from biofuzz.fuzzer.status import RuntimeStatus
-from biofuzz.fuzzer.worker import dock_worker
+from biofuzz.fuzzer.worker import dock_worker, prepare_worker
 from biofuzz.mutator import mutate_with_metadata
+from biofuzz.mutator.entry import MutationCandidate
 from biofuzz.oracle import OracleConfig, evaluate
 from biofuzz.prep import prepare_smiles
 from biofuzz.protein import parse_receptor_residues
 from biofuzz.seeds import compute_seed_priority, load_seeds
-from biofuzz.storage import FindingsStore, FuzzerLog, PDBQTCache, make_run_dir
+from biofuzz.storage import (
+    CheckpointVersionError,
+    FindingsStore,
+    FuzzerLog,
+    PDBQTCache,
+    make_run_dir,
+    open_run_dir,
+)
 
 
 @dataclass
@@ -33,6 +43,12 @@ class CampaignState:
     best_affinity: float | None = None
     checkpoint_count: int = 0
     stopped_reason: str = ""
+    # Canonical SMILES already docked in this campaign. Docking is the entire
+    # cost of the loop, so re-docking a molecule a mutation happened to
+    # rediscover is pure waste.
+    evaluated: set = field(default_factory=set)
+    docks_skipped: int = 0
+    prep_failures: int = 0
 
 
 class Campaign:
@@ -48,6 +64,9 @@ class Campaign:
         checkpoint_every: int = 500,
         ui_callback=None,
         ui=None,
+        resume_dir: str | Path | None = None,
+        checkpoint_every_seconds: float | None = 300.0,
+        seed: int | None = None,
     ):
         self.target_name = target_name
         self.target_config = target_config
@@ -55,17 +74,25 @@ class Campaign:
         self.workers = workers
         self.max_iterations = max_iterations
         self.checkpoint_every = checkpoint_every
+        self.checkpoint_every_seconds = checkpoint_every_seconds
         self.ui_callback = ui_callback
         # `ui` is an optional richer object (e.g. FuzzerTUI) exposing both
         # .update(status) and .log(message) -- the fuzzer.md doc only
         # specifies a bare status callback, but ui.md's own log()/notice()
         # methods need something to call them; this is that something.
         self.ui = ui
+        self._rng = random.Random(seed)
 
-        self.layout = make_run_dir(output_dir, target_name)
+        resuming = resume_dir is not None
+        self.layout = (
+            open_run_dir(resume_dir) if resuming else make_run_dir(output_dir, target_name)
+        )
         self.log = FuzzerLog(self.layout.log_path)
 
-        molecules_cfg = global_config.get("molecules", {})
+        # Per-target first (merge_defaults overlays it onto the global section):
+        # viable chemical space differs by target, and a global-only bound
+        # silently filters out whole drug classes -- see merge_defaults.
+        molecules_cfg = target_config.get("molecules") or global_config.get("molecules", {})
         self.filter_kwargs = dict(
             min_mw=molecules_cfg.get("min_mw", 0.0),
             max_mw=molecules_cfg.get("max_mw", 550.0),
@@ -83,6 +110,7 @@ class Campaign:
                 novelty_weight=corpus_cfg.get("priority_new_bit_weight", 1.0),
                 affinity_weight=corpus_cfg.get("priority_affinity_weight", 1.0),
                 base_mutations=self.base_mutations,
+                scaffold_penalty_weight=corpus_cfg.get("priority_scaffold_penalty", 3.0),
             ),
             coverage=self._build_coverage(target_config, global_config),
             findings=FindingsStore(self.layout.findings_dir),
@@ -94,15 +122,21 @@ class Campaign:
         self.protein_residues = parse_receptor_residues(self.receptor_path, pocket_residue_ids)
 
         self.docking_config = self._build_docking_config(target_config, global_config)
-        self.oracle_config = self._build_oracle_config(target_config)
+        self.oracle_config = self._build_oracle_config(target_config, global_config)
 
         self._start_time = time.time()
+        self._last_checkpoint_time = self._start_time
         self._total_docks = 0
         self._completed_docks = 0
         self._last_gpu_active = None
+        self._pool: ProcessPoolExecutor | None = None
 
-        if seeds_path:
+        if resuming:
+            self._restore_checkpoints()
+        elif seeds_path:
             self._load_seeds(seeds_path)
+
+    # ---------------- configuration ----------------
 
     def _build_coverage(self, target_config: dict, global_config: dict) -> CoverageMap:
         pocket_residue_ids = set(target_config["pocket"]["residue_ids"])
@@ -112,45 +146,79 @@ class Campaign:
             map_size_bytes=coverage_cfg.get("map_size_kib", 256) * 1024,
             occupancy_rotate_threshold=coverage_cfg.get("occupancy_rotate_threshold", 0.55),
             interaction_types_enabled=coverage_cfg.get("interaction_types", False),
+            novelty_weights=coverage_cfg.get("novelty_weights"),
             contact_cutoff=target_config["pocket"].get("contact_cutoff", 3.5),
         )
 
     def _build_docking_config(self, target_config: dict, global_config: dict) -> DockingConfig:
-        docking_cfg = global_config.get("docking", {})
+        docking_cfg = target_config.get("docking", global_config.get("docking", {}))
         box = target_config["box"]
         return DockingConfig(
             receptor_path=self.receptor_path,
             center_x=box["center_x"], center_y=box["center_y"], center_z=box["center_z"],
             size_x=box["size_x"], size_y=box["size_y"], size_z=box["size_z"],
-            exhaustiveness=docking_cfg.get("exhaustiveness_fuzz", 4),
+            exhaustiveness=docking_cfg.get("exhaustiveness_fuzz", 8),
             num_modes=docking_cfg.get("num_modes", 3),
-            timeout_seconds=docking_cfg.get("timeout_seconds", 120),
+            timeout_seconds=docking_cfg.get("timeout_seconds", 300),
             workers=self.workers,
             cnn_model=docking_cfg.get("cnn_model_fuzz", "fast"),
         )
 
-    def _build_oracle_config(self, target_config: dict) -> OracleConfig:
-        oracle_cfg = target_config.get("oracle", {})
+    def _build_oracle_config(self, target_config: dict, global_config: dict) -> OracleConfig:
+        oracle_cfg = dict(global_config.get("oracle", {}))
+        oracle_cfg.update(target_config.get("oracle", {}))
         return OracleConfig(
             affinity_threshold=oracle_cfg.get("affinity_threshold", -9.0),
             strain_threshold=oracle_cfg.get("strain_threshold", 3.5),
+            scoring_policy=oracle_cfg.get("scoring_policy", "consensus"),
+            min_ligand_efficiency=oracle_cfg.get("min_ligand_efficiency", 0.22),
+            min_cnn_pose_score=oracle_cfg.get("min_cnn_pose_score", 0.4),
+            max_score_disagreement=oracle_cfg.get("max_score_disagreement"),
         )
 
+    # ---------------- setup ----------------
+
     def _load_seeds(self, seeds_path: str) -> None:
+        # The corpus is seeded only from the target-agnostic approved-drug set.
+        # A target's own known inhibitor is deliberately not injected here and
+        # gets no priority boost: discovery must not be handed the answer. If a
+        # known binder happens to already be in seeds/approved_drugs.smi it
+        # competes on the same drug-likeness prior as everything else.
         for smiles, seed_id in load_seeds(seeds_path):
-            priority = compute_seed_priority(smiles, target_specific=False)
+            priority = compute_seed_priority(smiles)
             self.state.corpus.add(CorpusEntry(smiles=smiles, source_id=seed_id, priority=priority))
 
-        per_target_dir = Path("seeds") / "per_target" / self.target_name
-        if per_target_dir.is_dir():
-            for seed_file in per_target_dir.glob("*.smi"):
-                for smiles, seed_id in load_seeds(seed_file):
-                    priority = compute_seed_priority(smiles, target_specific=True)
-                    self.state.corpus.add(
-                        CorpusEntry(smiles=smiles, source_id=seed_id, priority=priority)
-                    )
-
         self.log.write("INFO", f"[SEED] adding {self.state.corpus.size()} seeds to corpus")
+
+    def _restore_checkpoints(self) -> None:
+        corpus_path = self.layout.corpus_dir / "state.json"
+        if corpus_path.exists():
+            self.state.corpus.load(corpus_path)
+            for smiles, entry in self.state.corpus._entries.items():
+                if entry.calibrated:
+                    self.state.evaluated.add(smiles)
+            self.log.write(
+                "INFO",
+                f"[RESUME] corpus restored: {self.state.corpus.size()} entries, "
+                f"{len(self.state.evaluated)} already docked",
+            )
+        else:
+            self.log.write("WARN", f"[RESUME] no corpus checkpoint at {corpus_path}")
+
+        if self.layout.coverage_path.exists():
+            try:
+                self.state.coverage.load(self.layout.coverage_path)
+                self.log.write(
+                    "INFO",
+                    f"[RESUME] coverage restored: epoch={self.state.coverage.epoch} "
+                    f"union={self.state.coverage.union_coverage():.3f}",
+                )
+            except CheckpointVersionError as exc:
+                self.log.write("WARN", f"[RESUME] coverage checkpoint unusable, starting fresh: {exc}")
+        else:
+            self.log.write("WARN", f"[RESUME] no coverage checkpoint at {self.layout.coverage_path}")
+
+    # ---------------- status ----------------
 
     def _emit_status(self, stage: str, **kwargs) -> None:
         if self.ui_callback is None and self.ui is None:
@@ -179,55 +247,121 @@ class Campaign:
             checkpoints=self.state.checkpoint_count,
             elapsed_seconds=elapsed,
             gpu_active=self._last_gpu_active,
+            union_coverage=self.state.coverage.union_coverage(),
+            distinct_scaffolds=self.state.corpus.distinct_scaffolds(),
+            docks_skipped=self.state.docks_skipped,
         )
         if self.ui_callback is not None:
             self.ui_callback(status)
         if self.ui is not None:
             self.ui.update(status)
 
+    # ---------------- work ----------------
+
     def _select_stage(self, entry: CorpusEntry) -> tuple[str, str | None]:
         # Corpus.pop() increments times_selected before returning the entry,
         # so a value of 1 here means this is the first time it's been popped.
-        if entry.times_selected <= 1:
-            return "deterministic", None
         donor = self.state.corpus.sample_donor(exclude_smiles=entry.smiles)
-        if donor is not None:
-            return "splice", donor.smiles
-        return "havoc", None
+        stage = select_stage(entry, self._rng, has_donor=donor is not None)
+        return stage, donor.smiles if (stage == "splice" and donor is not None) else None
+
+    def _pool_or_none(self) -> ProcessPoolExecutor | None:
+        """One pool for the whole campaign.
+
+        The pool used to be created and torn down inside every iteration, so
+        every batch paid full interpreter start-up (and a fresh RDKit import)
+        per worker before any docking began.
+        """
+        if self.workers <= 1:
+            return None
+        if self._pool is None:
+            self._pool = ProcessPoolExecutor(max_workers=self.workers)
+        return self._pool
+
+    def _shutdown_pool(self, cancel_futures: bool = False) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=True, cancel_futures=cancel_futures)
+            self._pool = None
 
     def _prepare_mutants(self, mutants) -> list[tuple[object, str]]:
-        prepared = []
+        """SMILES -> PDBQT for each mutant, skipping ones already docked.
+
+        3D embedding plus MMFF optimisation is the second-largest cost in the
+        loop after docking itself, and it was running serially on the main
+        process while the worker pool idled.
+        """
+        pending: list = []
+        prepared: list[tuple[object, str]] = []
+
         for mutant in mutants:
-            pdbqt = self.state.cache.get(mutant.smiles)
-            if pdbqt is None:
+            if mutant.smiles in self.state.evaluated:
+                self.state.docks_skipped += 1
+                continue
+            cached = self.state.cache.get(mutant.smiles)
+            if cached is not None:
+                prepared.append((mutant, cached))
+            else:
+                pending.append(mutant)
+
+        if not pending:
+            return prepared
+
+        pool = self._pool_or_none()
+        if pool is None:
+            for mutant in pending:
                 pdbqt = prepare_smiles(mutant.smiles, **self.filter_kwargs)
                 if pdbqt is None:
+                    self.state.prep_failures += 1
                     continue
                 self.state.cache.set(mutant.smiles, pdbqt)
+                prepared.append((mutant, pdbqt))
+            return prepared
+
+        futures = {
+            pool.submit(prepare_worker, mutant.smiles, self.filter_kwargs): mutant
+            for mutant in pending
+        }
+        for future in as_completed(futures):
+            mutant = futures[future]
+            try:
+                pdbqt = future.result()
+            except Exception:
+                pdbqt = None
+            if pdbqt is None:
+                self.state.prep_failures += 1
+                continue
+            self.state.cache.set(mutant.smiles, pdbqt)
             prepared.append((mutant, pdbqt))
         return prepared
 
-    def _dock_all(self, prepared: list[tuple[object, str]]) -> list[tuple[object, object]]:
+    def _dock_all(
+        self, prepared: list[tuple[object, str]], mutation_stage: str = ""
+    ) -> list[tuple[object, object]]:
         results = []
         self._total_docks += len(prepared)
+        # Each dock can take tens of seconds on CPU; emit after every
+        # completion (not just once per batch) so the UI reflects progress
+        # instead of appearing frozen for the whole batch.
+        self._emit_status("dock", mutation_stage=mutation_stage)
 
-        if self.workers > 1 and len(prepared) > 1:
-            with ProcessPoolExecutor(max_workers=self.workers) as pool:
-                futures = {
-                    pool.submit(dock_worker, pdbqt, self.docking_config): mutant
-                    for mutant, pdbqt in prepared
-                }
-                try:
-                    for future in as_completed(futures):
-                        mutant = futures[future]
-                        result = future.result()
-                        results.append((mutant, result))
-                        self._completed_docks += 1
-                        if result.gpu_active is not None:
-                            self._last_gpu_active = result.gpu_active
-                except KeyboardInterrupt:
-                    pool.shutdown(wait=True, cancel_futures=True)
-                    raise
+        pool = self._pool_or_none()
+        if pool is not None and len(prepared) > 1:
+            futures = {
+                pool.submit(dock_worker, pdbqt, self.docking_config): mutant
+                for mutant, pdbqt in prepared
+            }
+            try:
+                for future in as_completed(futures):
+                    mutant = futures[future]
+                    result = future.result()
+                    results.append((mutant, result))
+                    self._completed_docks += 1
+                    if result.gpu_active is not None:
+                        self._last_gpu_active = result.gpu_active
+                    self._emit_status("dock", mutation_stage=mutation_stage)
+            except KeyboardInterrupt:
+                self._shutdown_pool(cancel_futures=True)
+                raise
         else:
             backend = GninaBackend()
             for mutant, pdbqt in prepared:
@@ -236,6 +370,7 @@ class Campaign:
                 self._completed_docks += 1
                 if result.gpu_active is not None:
                     self._last_gpu_active = result.gpu_active
+                self._emit_status("dock", mutation_stage=mutation_stage)
 
         return results
 
@@ -250,10 +385,19 @@ class Campaign:
                     pose_atoms, self.protein_residues, smiles=mutant.smiles
                 )
                 modes = parse_log(result.log_text)
-                verdict = evaluate(modes, pose_text, self.oracle_config)
+                if not modes:
+                    # gnina exited cleanly but produced no scored pose. There is
+                    # no measurement here: evaluate() would report affinity 0.0,
+                    # which would then be recorded as though it were real.
+                    self.state.evaluated.add(mutant.smiles)
+                    continue
+
+                verdict = evaluate(modes, pose_text, self.oracle_config, smiles=mutant.smiles)
+
+                self.state.evaluated.add(mutant.smiles)
 
                 if verdict.is_hit:
-                    self.state.findings.save(
+                    saved = self.state.findings.save(
                         smiles=mutant.smiles,
                         verdict={"passed_tiers": verdict.passed_tiers, "notes": verdict.notes},
                         pose_path=result.pose_path,
@@ -263,30 +407,99 @@ class Campaign:
                         mutation_type=mutant.mutation_type,
                         parent_smiles=mutant.parent_smiles,
                         corpus_source_id=entry.source_id,
+                        ligand_efficiency=verdict.ligand_efficiency,
+                        heavy_atom_count=verdict.heavy_atom_count,
+                        vina_affinity=verdict.vina_affinity,
+                        cnn_affinity_kcal=verdict.cnn_affinity_kcal,
+                        cnn_pose_score=verdict.cnn_pose_score,
+                        scoring_policy=verdict.scoring_policy,
+                        novelty_class=obs.novelty_class,
+                        new_coverage_bits=obs.new_bits,
                     )
-                    self.state.hits += 1
-                    hit_message = f"[HIT] {mutant.smiles} | affinity={verdict.affinity:.2f}"
-                    self.log.write("HIT", hit_message)
-                    if self.ui is not None:
-                        self.ui.log(hit_message)
+                    if saved is not None:
+                        self.state.hits += 1
+                        le_text = (
+                            f" LE={verdict.ligand_efficiency:.2f}"
+                            if verdict.ligand_efficiency is not None
+                            else ""
+                        )
+                        hit_message = (
+                            f"[HIT] {mutant.smiles} | affinity={verdict.affinity:.2f}{le_text}"
+                        )
+                        self.log.write("HIT", hit_message)
+                        if self.ui is not None:
+                            self.ui.log(hit_message)
 
                 if self.state.best_affinity is None or verdict.affinity < self.state.best_affinity:
                     self.state.best_affinity = verdict.affinity
 
-                self.state.corpus.add(
+                added = self.state.corpus.add(
                     mutant.smiles,
                     novelty=obs.novelty_score,
                     affinity=verdict.affinity,
                     mutation_type=mutant.mutation_type,
+                    rarity=obs.rarity,
+                    ligand_efficiency=verdict.ligand_efficiency,
                 )
+                added.calibrated = True
             finally:
                 if result.pose_path and os.path.exists(result.pose_path):
                     os.unlink(result.pose_path)
+
+    def _calibrate(self, entry: CorpusEntry) -> None:
+        """Dock the entry itself, once, before fuzzing its mutants.
+
+        Seeds used to enter the corpus and only ever have their *mutants*
+        docked, so BioFuzz never actually measured whether an approved drug
+        binds the target -- which is the whole drug-repurposing use case. It
+        also left every seed with best_affinity=None, so the power schedule
+        was ranking seeds on no evidence at all. This is AFL++'s calibration
+        exec: run the input itself, learn what it does, then fuzz it.
+        """
+        if entry.calibrated or entry.smiles in self.state.evaluated:
+            entry.calibrated = True
+            return
+
+        self._emit_status("calibrate", current_parent=entry.smiles)
+
+        pdbqt = self.state.cache.get(entry.smiles)
+        if pdbqt is None:
+            pdbqt = prepare_smiles(entry.smiles, **self.filter_kwargs)
+            if pdbqt is None:
+                # Loudly: a seed that can't be prepared is a *known drug this
+                # campaign will never test*, and it is almost always the
+                # molecules bounds rejecting it rather than a chemistry problem.
+                # Silently skipping is how indinavir -- hiv_protease's own
+                # reference drug -- went untested against hiv_protease.
+                self.state.prep_failures += 1
+                self.log.write(
+                    "WARN",
+                    f"[PREP] cannot prepare corpus entry, it will never be docked: "
+                    f"{entry.smiles} (source={entry.source_id or 'mutant'}; "
+                    f"check molecules bounds, e.g. max_mw={self.filter_kwargs['max_mw']})",
+                )
+                entry.calibrated = True
+                self.state.evaluated.add(entry.smiles)
+                return
+            self.state.cache.set(entry.smiles, pdbqt)
+
+        candidate = MutationCandidate(
+            smiles=entry.smiles,
+            stage="calibration",
+            mutation_type="seed",
+            parent_smiles=entry.smiles,
+        )
+        results = self._dock_all([(candidate, pdbqt)], mutation_stage="calibration")
+        self._process_results(entry, results)
+        entry.calibrated = True
 
     def run_iteration(self) -> bool:
         entry = self.state.corpus.pop()
         if entry is None:
             return False
+
+        if not entry.calibrated:
+            self._calibrate(entry)
 
         stage, donor_smiles = self._select_stage(entry)
         budget = compute_mutation_budget(entry, self.base_mutations)
@@ -301,33 +514,64 @@ class Campaign:
 
         prepared = self._prepare_mutants(mutants)
 
-        self._emit_status("dock", mutation_stage=stage)
-        results = self._dock_all(prepared)
+        results = self._dock_all(prepared, mutation_stage=stage)
 
         self._process_results(entry, results)
 
         entry.times_fuzzed += 1
-        entry.priority = self.state.corpus.compute_priority(entry)
+        # Reprice from this entry's own evidence; Corpus.add applies the
+        # scaffold-crowding discount on top when it re-queues.
+        entry.base_priority = self.state.corpus.compute_priority(entry)
         self.state.corpus.add(entry)
 
         self.state.iterations += 1
 
-        if self.state.iterations % self.checkpoint_every == 0:
+        if self._should_checkpoint():
             self.checkpoint()
 
         self._emit_status("idle", mutation_stage=stage)
         return True
 
+    def _should_checkpoint(self) -> bool:
+        """Checkpoint on iterations *or* elapsed time, whichever comes first.
+
+        Iteration count alone is a bad clock here: one iteration is a whole
+        batch of docks, so at CPU docking speeds `checkpoint_every=500` is days
+        of work. The reference campaign ran ~2 hours and never checkpointed
+        once -- it left no corpus/state.json and no coverage.json, so none of
+        that compute could be resumed or inspected.
+        """
+        if self.checkpoint_every and self.state.iterations % self.checkpoint_every == 0:
+            return True
+        if self.checkpoint_every_seconds:
+            return (time.time() - self._last_checkpoint_time) >= self.checkpoint_every_seconds
+        return False
+
     def checkpoint(self) -> None:
         self.state.corpus.save(self.layout.corpus_dir / "state.json")
         self.state.coverage.save(self.layout.coverage_path)
         self.state.checkpoint_count += 1
+        self._last_checkpoint_time = time.time()
         self.log.write(
             "CHKPT",
             f"iterations={self.state.iterations} "
             f"occupancy={self.state.coverage.bitmap_occupancy():.3f} "
-            f"epoch={self.state.coverage.epoch} corpus={self.state.corpus.size()}",
+            f"union={self.state.coverage.union_coverage():.3f} "
+            f"epoch={self.state.coverage.epoch} corpus={self.state.corpus.size()} "
+            f"scaffolds={self.state.corpus.distinct_scaffolds()} hits={self.state.hits}",
         )
+
+    def _finish(self) -> None:
+        self.log.write(
+            "INFO",
+            f"campaign stopped: {self.state.stopped_reason} "
+            f"iterations={self.state.iterations} hits={self.state.hits} "
+            f"docks={self._completed_docks} skipped={self.state.docks_skipped}",
+        )
+        self.log.close()
+        self._shutdown_pool()
+        if self.ui is not None:
+            self.ui.close()
 
     def run(self) -> CampaignState:
         try:
@@ -341,23 +585,9 @@ class Campaign:
         except KeyboardInterrupt:
             self.state.stopped_reason = "keyboard_interrupt"
             self.checkpoint()
-            self.log.write(
-                "INFO",
-                f"campaign stopped: {self.state.stopped_reason} "
-                f"iterations={self.state.iterations} hits={self.state.hits}",
-            )
-            self.log.close()
-            if self.ui is not None:
-                self.ui.close()
+            self._finish()
             raise
 
         self.checkpoint()
-        self.log.write(
-            "INFO",
-            f"campaign stopped: {self.state.stopped_reason} "
-            f"iterations={self.state.iterations} hits={self.state.hits}",
-        )
-        self.log.close()
-        if self.ui is not None:
-            self.ui.close()
+        self._finish()
         return self.state

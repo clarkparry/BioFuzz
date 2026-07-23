@@ -65,7 +65,17 @@ pocket:
     - "B:82"
     - "B:84"
 
-# Reference: Indinavir, ~-11 kcal/mol (see targets/hiv_protease/reference_ligands/)
-oracle:
-  affinity_threshold: -10.0
-  strain_threshold: 3.5
+# HIV protease inhibitors are peptidomimetics and legitimately larger and more
+# flexible than the global drug-like bounds allow: known drugs of the class run
+# 600-720 Da with 15+ rotatable bonds (indinavir 614, saquinavir 671, ritonavir
+# 721). At the global max_mw of 550 the fuzzer silently rejects that entire class
+# at the preparation step, before docking, so nothing resembling what actually
+# inhibits this protein could ever be generated. Bounds here admit the class; the
+# oracle's ligand-efficiency tier keeps the extra molecular weight honest. (This
+# is a chemical-space bound, not a known-inhibitor dependency -- no molecule is
+# seeded or scored against any of those drugs.)
+molecules:
+  max_mw: 750
+  max_rot_bonds: 16
+  max_hbd: 12
+  max_hba: 14

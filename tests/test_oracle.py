@@ -52,3 +52,128 @@ def test_arbitrary_line_containing_word_strain_not_matched():
 def test_no_modes_is_not_a_hit():
     verdict = evaluate([], "REMARK\n", CFG)
     assert not verdict.is_hit
+
+
+# --- Tiers that were dead or missing in the reference campaign ---
+
+
+def test_strain_comes_from_the_intramol_column_not_a_pose_remark():
+    """gnina reports strain in its table, never as a pose REMARK.
+
+    The oracle only looked for a REMARK, so every finding in the reference
+    campaign recorded strain=null and the strain tier gated nothing.
+    """
+    modes = [DockingMode(mode=1, affinity=-10.5, intramol=8.2, cnn_affinity=None)]
+    verdict = evaluate(modes, "REMARK no strain annotation here\n", CFG)
+    assert verdict.strain == 8.2
+    assert not verdict.is_hit
+    assert "strain" not in verdict.passed_tiers
+
+
+def test_low_intramol_passes_strain_tier():
+    modes = [DockingMode(mode=1, affinity=-10.5, intramol=1.2)]
+    verdict = evaluate(modes, "", CFG)
+    assert verdict.strain == 1.2
+    assert verdict.is_hit
+    assert "strain" in verdict.passed_tiers
+
+
+def test_ligand_efficiency_tier_rejects_oversized_binder():
+    cfg = OracleConfig(
+        affinity_threshold=-9.0, strain_threshold=3.5, min_ligand_efficiency=0.30
+    )
+    # Sildenafil-sized molecule scraping past the affinity gate on bulk alone.
+    big = "CCCc1nn(C)c2c(=O)[nH]c(-c3cc(S(=O)(=O)N4CCN(C)CC4)ccc3OCC)nc12"
+    modes = [DockingMode(mode=1, affinity=-9.5)]
+    verdict = evaluate(modes, "", cfg, smiles=big)
+
+    assert "affinity" in verdict.passed_tiers
+    assert not verdict.is_hit  # ... but fails on efficiency
+    assert "ligand efficiency" in verdict.notes
+
+
+def test_ligand_efficiency_tier_skipped_without_structure():
+    """No SMILES means LE can't be computed -- skip the tier, don't fail it."""
+    cfg = OracleConfig(
+        affinity_threshold=-9.0, strain_threshold=3.5, min_ligand_efficiency=0.30
+    )
+    verdict = evaluate([DockingMode(mode=1, affinity=-10.5)], "", cfg)
+    assert verdict.is_hit
+    assert verdict.ligand_efficiency is None
+
+
+def test_ligand_efficiency_tier_disabled_by_none():
+    cfg = OracleConfig(
+        affinity_threshold=-9.0, strain_threshold=3.5, min_ligand_efficiency=None
+    )
+    modes = [DockingMode(mode=1, affinity=-9.5)]
+    verdict = evaluate(modes, "", cfg, smiles="c1ccccc1" * 3)
+    assert verdict.is_hit
+
+
+def test_cnn_pose_score_tier_rejects_low_confidence_pose():
+    """The sharpest available tier: reference drugs score 0.80-0.97, and the
+    reference campaign's mutant chemistry scored ~0.32."""
+    cfg = OracleConfig(
+        affinity_threshold=-9.0,
+        strain_threshold=3.5,
+        min_cnn_pose_score=0.4,
+        min_ligand_efficiency=None,
+    )
+    unconvincing = [DockingMode(mode=1, affinity=-10.5, cnn_pose_score=0.32, cnn_affinity=9.0)]
+    assert not evaluate(unconvincing, "", cfg).is_hit
+
+    convincing = [DockingMode(mode=1, affinity=-10.5, cnn_pose_score=0.93, cnn_affinity=9.0)]
+    assert evaluate(convincing, "", cfg).is_hit
+
+
+def test_consensus_policy_rejects_what_vina_alone_would_accept():
+    """The scoring fix, end to end: vina says -11, the CNN disagrees."""
+    cfg = OracleConfig(
+        affinity_threshold=-10.0,
+        strain_threshold=3.5,
+        scoring_policy="consensus",
+        min_ligand_efficiency=None,
+        min_cnn_pose_score=None,
+    )
+    # CNN pKd 5.0 -> about -6.8 kcal/mol.
+    modes = [DockingMode(mode=1, affinity=-11.0, cnn_affinity=5.0)]
+
+    assert not evaluate(modes, "", cfg).is_hit
+
+    vina_only = OracleConfig(
+        affinity_threshold=-10.0,
+        strain_threshold=3.5,
+        scoring_policy="vina",
+        min_ligand_efficiency=None,
+        min_cnn_pose_score=None,
+    )
+    assert evaluate(modes, "", vina_only).is_hit  # what the old oracle did
+
+
+def test_verdict_carries_per_function_detail():
+    cfg = OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5, min_ligand_efficiency=None)
+    modes = [DockingMode(mode=1, affinity=-10.5, intramol=0.5, cnn_pose_score=0.9, cnn_affinity=8.0)]
+    verdict = evaluate(modes, "", cfg, smiles="CCO")
+
+    assert verdict.vina_affinity == -10.5
+    assert verdict.cnn_affinity_kcal is not None
+    assert verdict.cnn_pose_score == 0.9
+    assert verdict.scoring_policy == "consensus"
+    assert verdict.heavy_atom_count == 3
+
+
+def test_max_score_disagreement_tier():
+    cfg = OracleConfig(
+        affinity_threshold=-9.0,
+        strain_threshold=3.5,
+        scoring_policy="vina",
+        min_ligand_efficiency=None,
+        min_cnn_pose_score=None,
+        max_score_disagreement=2.0,
+    )
+    # vina -12.0 vs CNN pKd 5.0 (~-6.8): a 5+ kcal/mol conflict.
+    conflicted = [DockingMode(mode=1, affinity=-12.0, cnn_affinity=5.0)]
+    verdict = evaluate(conflicted, "", cfg)
+    assert not verdict.is_hit
+    assert "disagreement" in verdict.notes

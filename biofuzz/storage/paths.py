@@ -15,6 +15,33 @@ class RunLayout:
     log_path: Path
 
 
+def open_run_dir(root: Path | str) -> RunLayout:
+    """Build a layout over an existing run directory, for --resume.
+
+    Unlike make_run_dir this never allocates a new suffixed directory: it
+    reattaches to exactly the run named, so a resumed campaign keeps writing
+    its corpus, coverage and findings where the interrupted one left them.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        raise FileNotFoundError(f"run directory does not exist: {root}")
+
+    corpus_dir = root / "corpus"
+    findings_dir = root / "findings"
+    cache_dir = root / "cache"
+    for d in (corpus_dir, findings_dir, cache_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    return RunLayout(
+        root=root,
+        corpus_dir=corpus_dir,
+        findings_dir=findings_dir,
+        cache_dir=cache_dir,
+        coverage_path=root / "coverage.json",
+        log_path=root / "fuzzer.log",
+    )
+
+
 def make_run_dir(base_dir: Path | str, target: str, stamp: str | None = None, now: datetime | None = None) -> RunLayout:
     base_dir = Path(base_dir)
     if stamp is None:

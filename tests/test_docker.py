@@ -20,7 +20,8 @@ def test_gnina_dock_indinavir():
         receptor_path=HIV_RECEPTOR,
         center_x=13.073, center_y=22.467, center_z=5.557,
         size_x=20.0, size_y=20.0, size_z=20.0,
-        exhaustiveness=4, num_modes=3, timeout_seconds=120,
+        exhaustiveness=4, num_modes=3, timeout_seconds=300,
+        cnn_model="fast",
     )
     ligand_pdbqt = open(INDINAVIR_LIGAND).read()
 
@@ -47,7 +48,8 @@ def test_gpu_inactive_on_this_cpu_only_machine():
         receptor_path=HIV_RECEPTOR,
         center_x=13.073, center_y=22.467, center_z=5.557,
         size_x=20.0, size_y=20.0, size_z=20.0,
-        exhaustiveness=4, num_modes=1, timeout_seconds=120,
+        exhaustiveness=4, num_modes=1, timeout_seconds=300,
+        cnn_model="fast",
     )
     ligand_pdbqt = open(INDINAVIR_LIGAND).read()
 
@@ -74,7 +76,8 @@ def test_cpu_flag_only_passed_when_workers_greater_than_one(monkeypatch):
         receptor_path=HIV_RECEPTOR,
         center_x=13.073, center_y=22.467, center_z=5.557,
         size_x=20.0, size_y=20.0, size_z=20.0,
-        exhaustiveness=4, num_modes=1, timeout_seconds=120,
+        exhaustiveness=4, num_modes=1, timeout_seconds=300,
+        cnn_model="fast",
         workers=1,
     )
     ligand_pdbqt = open(INDINAVIR_LIGAND).read()

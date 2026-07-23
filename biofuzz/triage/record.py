@@ -15,8 +15,18 @@ class TriageRecord:
     confirmed_affinity: float | None = None
     strain: float | None = None
     ligand_efficiency: float | None = None
-    selectivity_ratio: float | None = None
+    # Selectivity as a free-energy gap (kcal/mol, positive = prefers on-target)
+    # and the Kd fold-difference it implies. Replaces the old selectivity_ratio,
+    # which divided two kcal/mol energies -- a meaningless quantity.
+    selectivity_ddg: float | None = None
+    selectivity_fold: float | None = None
+    offtarget_affinity: float | None = None
     pose_rmsd_spread: float | None = None
+    # Per-scoring-function detail behind confirmed_affinity.
+    vina_affinity: float | None = None
+    cnn_affinity_kcal: float | None = None
+    cnn_pose_score: float | None = None
+    score_disagreement: float | None = None
     heavy_atom_count: int | None = None
     molecular_weight: float | None = None
     logp: float | None = None
@@ -39,8 +49,14 @@ class TriageRecord:
             "confirmed_affinity": self.confirmed_affinity,
             "strain": self.strain,
             "ligand_efficiency": self.ligand_efficiency,
-            "selectivity_ratio": self.selectivity_ratio,
+            "selectivity_ddg": self.selectivity_ddg,
+            "selectivity_fold": self.selectivity_fold,
+            "offtarget_affinity": self.offtarget_affinity,
             "pose_rmsd_spread": self.pose_rmsd_spread,
+            "vina_affinity": self.vina_affinity,
+            "cnn_affinity_kcal": self.cnn_affinity_kcal,
+            "cnn_pose_score": self.cnn_pose_score,
+            "score_disagreement": self.score_disagreement,
             "heavy_atom_count": self.heavy_atom_count,
             "molecular_weight": self.molecular_weight,
             "logp": self.logp,

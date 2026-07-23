@@ -40,16 +40,23 @@ c1ccc2c(c1)cc1ccc3cccc4ccc2c1c34  polycyclic_scaffold
 ...
 ```
 
-### Target-Specific Seeds: `seeds/per_target/<target_name>/`
+### No Target-Specific Seeds
 
-Known inhibitors for the specific target, if available. These are loaded in addition to the primary set when that target is being fuzzed.
+BioFuzz deliberately does **not** inject a target's own known inhibitor into the
+corpus. The premise of the tool is that you point it at any protein and it finds
+a binder; seeding it with the answer for the bundled example targets both
+defeats that premise and inflates apparent performance. There is no
+`seeds/per_target/` tree.
 
-Sources:
-- Co-crystallized ligands from the PDB structure used to prepare the receptor
-- Known potent inhibitors from ChEMBL bioactivity data (IC50 ≤ 100 nM)
-- Reference inhibitors bundled with each bundled target
+The only seed source is the target-agnostic `seeds/approved_drugs.smi`. If a
+molecule that happens to bind the target is in that curated set, fine — but it
+enters on the same drug-likeness prior as every other seed and gets **no**
+priority boost for being a known binder. Nothing is added just because it is
+known to work on this specific target.
 
-These get a priority boost in the initial corpus population because they are known to work on this exact target.
+(Known inhibitors still ship under `targets/<name>/reference_ligands/`, but only
+as an optional *validation* set — molecules you can dock to check the oracle is
+not so strict it rejects real drugs. They never enter the discovery corpus.)
 
 ---
 
@@ -64,10 +71,9 @@ seed_priority = base_affinity_estimate + scaffold_diversity_bonus
 
 base_affinity_estimate:
   Use drug-likeness metrics as a proxy (no docking needed):
-  - Higher MW within range → modest priority bonus (bigger molecules tend to score better)
+  - MW near the centre of the drug-like band (~350 Da) → modest priority bonus,
+    falling off in BOTH directions. Not "higher MW → bonus".
   - Lower logP → modest bonus (better bioavailability)
-  
-  Target-specific seeds get a fixed priority bonus over generic seeds.
 
 scaffold_diversity_bonus:
   Assign a small bonus to seeds whose Murcko scaffold is underrepresented
@@ -76,6 +82,20 @@ scaffold_diversity_bonus:
 
 This gives the corpus a non-trivial starting priority order without any docking. The first time each seed is popped, it gets docked, its actual affinity is recorded, and its priority is updated to reflect the real coverage signal.
 
+> **The MW term must not be an unbounded ramp.** This section previously read
+> "higher MW within range → bonus (bigger molecules tend to score better)". The
+> parenthetical is true, and that is precisely the problem: docking scores grow
+> with heavy-atom count as an *artifact*, so a seed prior that rewards size
+> compounds the bias instead of correcting for it. "Within range" was also not
+> implemented as a range — the code was `max(0, (mw - 350)/100) * 2`, unbounded,
+> so the heaviest seed in the file was always popped first. That is how one 2-hour
+> campaign came to spend itself entirely on sildenafil (MW 475). See
+> `docs/evaluation_2026-07.md` §B4.
+>
+> Priority is `base_priority` on the CorpusEntry (intrinsic worth), not
+> `priority` (which the Corpus derives by subtracting scaffold crowding).
+> Assigning a seed prior to `priority` lets the queue overwrite it.
+
 ---
 
 ## AFL++ Parallel: Calibration vs. Triage
@@ -83,6 +103,14 @@ This gives the corpus a non-trivial starting priority order without any docking.
 AFL++ does calibrate seeds on startup (runs them through the target to get their initial coverage bitmap). It does NOT triage/filter seeds — all seeds enter the queue.
 
 BioFuzz mirrors this: when a seed is first popped and docked, that's its calibration. If its affinity is poor, its priority drops and it gets selected less often. It stays in the corpus because it might still be useful as a splice donor. Discarding seeds based on poor initial docking would lose potentially valuable scaffolds.
+
+> **This is `Campaign._calibrate()`, and for a long time it did not exist.** The
+> fuzzing loop docked *mutants* only; a corpus entry was never docked itself. So
+> BioFuzz never measured whether an approved drug binds the target — the entire
+> drug-repurposing question, unasked — and every seed kept `best_affinity = None`
+> forever, leaving the power schedule to rank 251 seeds on no evidence at all.
+> The behaviour described in this section was specified here and simply never
+> implemented. See `docs/evaluation_2026-07.md` §B3.
 
 ---
 

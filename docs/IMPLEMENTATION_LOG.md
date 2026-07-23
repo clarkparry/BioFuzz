@@ -179,3 +179,66 @@ Known gaps / deliberately deferred, for future work:
 - `Mutator`'s bioisostere library covers a representative subset of `mutator.md`'s documented pairs, not all of them.
 - No target currently configures `offtarget_receptor`/`offtarget_box`, so Triage's selectivity stage has only been exercised in its "not configured" skip path, never a real off-target dock.
 - `docs/modules/coverage.md`'s interaction-type extension (hbond donor/acceptor/hydrophobic bits) uses a documented heavy-atom-only approximation, since true donor/acceptor character needs hydrogen positions that are stripped upstream by design.
+
+---
+
+## Wave 5 — July 2026 evaluation and correction
+
+An in-depth evaluation against the bundled reference campaign
+(`runs/2026-07-16_hiv_protease/`, ~2h, 1 worker, no GPU) and direct measurement
+of all five targets' reference drugs.
+
+Full write-ups: **[`docs/evaluation_2026-07.md`](evaluation_2026-07.md)** (findings)
+and **[`docs/improvements_2026-07.md`](improvements_2026-07.md)** (changes).
+
+**What the reference campaign actually produced:** 10 findings, all one
+sildenafil lineage, 9 carrying chemically impossible groups, 1 a literal
+duplicate, every one recording `strain: null` — and no checkpoint files at all,
+so two hours of docking left nothing resumable.
+
+**The core diagnosis:** the architecture was sound; several of the mechanisms it
+depends on were never connected, and the thresholds were set by intuition rather
+than measurement. In three of the worst cases `docs/modules/` already specified
+the correct behaviour and the code had diverged from its own spec (seed
+calibration, `SKIP_TO_HAVOC`, priority recomputed on pop). Two module docs
+contained outright errors the implementation faithfully reproduced — `oracle.md`
+claimed gnina reports strain in pose REMARKs (it does not), and `seeds.md`
+recommended rewarding high molecular weight (the exact docking artifact that
+needs correcting). Those docs are now fixed alongside the code, since they are
+what a future rebuild would follow.
+
+Headline items:
+
+- **gnina's CNN scores were parsed and discarded.** Every dock paid CNN inference
+  cost, then ranked on vina's score — the function gnina was chosen to improve on.
+  New `oracle/scoring.py`; default policy `consensus`.
+- **Corpus entries were never docked**, only their mutants — so the drug
+  repurposing question was never asked. Added `Campaign._calibrate()`.
+- **Havoc was unreachable** and **novelty was a constant**, which together
+  collapsed the queue onto one chemical series.
+- **parp1's threshold was unreachable by its own reference drug** (-11.0 set from
+  literature; talazoparib measures -10.45 here). All thresholds are now measured
+  via the new `scripts/calibrate_oracle.py`.
+- **The conventional 0.3 LE floor rejects four of five reference drugs.** Default
+  is 0.22, calibrated against them.
+- **Two of five targets silently rejected their own reference drug** at the
+  preparation step: the global 550 Da / logP 5.0 envelope excludes indinavir
+  (614 Da) and vemurafenib (logP 5.54) — and with them the entire chemical class
+  that works on those targets. `molecules:` is now per-target overridable. This
+  one surfaced only by *running* the fuzzer: a smoke run reported `docks=0`.
+
+Verified both directions: **5/5 reference drugs pass** the corrected oracle,
+**0/10 old findings survive** it. Two independent tiers catch them — the chemistry
+filter pre-dock, and pose confidence (real drugs 0.801–0.980; old findings
+0.108–0.314).
+
+And it finds things. The same one-iteration smoke run that read `docks=0 hits=0`
+before the per-target bounds fix now yields **2 hits at -11.18 / -11.17 kcal/mol**
+— chemically clean HIV protease peptidomimetics (`substituent_scan:NH2`,
+`halogen_scan:add_Cl`) clearing every tier, with CNN pose scores of 0.864/0.810
+in the reference-drug band, grown from the seed the tool previously could not even
+prepare. Two hours of the old pipeline produced ten impossible molecules from one
+scaffold; one iteration of this one produces two plausible leads against a
+stricter oracle.
+
+Tests 92 → 149, all passing; suite runtime ~6m40s → ~4m30s.

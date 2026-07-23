@@ -3,6 +3,8 @@ from __future__ import annotations
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 
+from biofuzz.mutator.alerts import is_chemically_plausible
+
 
 def passes_drug_likeness(
     mol: Chem.Mol,
@@ -12,7 +14,15 @@ def passes_drug_likeness(
     max_hbd: int,
     max_hba: int,
     max_rot_bonds: int,
+    check_stability: bool = True,
 ) -> bool:
+    """Property gate for a mutant.
+
+    `check_stability` adds the unstable-motif screen (see mutator/alerts.py).
+    It defaults on: property bounds alone accept molecules that cannot exist,
+    and those molecules dock and score like any other, so they consume the
+    campaign's budget and land in findings.
+    """
     if mol is None:
         return False
     if len(Chem.GetMolFrags(mol)) != 1:
@@ -27,5 +37,7 @@ def passes_drug_likeness(
     if Descriptors.NumHAcceptors(mol) > max_hba:
         return False
     if Descriptors.NumRotatableBonds(mol) > max_rot_bonds:
+        return False
+    if check_stability and not is_chemically_plausible(mol):
         return False
     return True

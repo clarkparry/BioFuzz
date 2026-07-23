@@ -141,7 +141,11 @@ def test_observe_with_real_pose_and_receptor_contacts():
         receptor_path="targets/hiv_protease/protein.pdbqt",
         center_x=13.073, center_y=22.467, center_z=5.557,
         size_x=20.0, size_y=20.0, size_z=20.0,
-        exhaustiveness=4, num_modes=1, timeout_seconds=120,
+        exhaustiveness=4, num_modes=1, timeout_seconds=300,
+        # Without cnn_model this selects gnina's full model ensemble (~97s per
+        # dock on an idle CPU here), which flakes against a short timeout under
+        # parallel test load. "fast" is what the fuzzer actually runs.
+        cnn_model="fast",
     )
     ligand_pdbqt = open("targets/hiv_protease/reference_ligands/indinavir.pdbqt").read()
     result = backend.dock(ligand_pdbqt, config)

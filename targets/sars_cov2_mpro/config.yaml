@@ -2,19 +2,22 @@ name: sars_cov2_mpro
 receptor: protein.pdbqt
 
 box:
-  center_x: -20.311
-  center_y: -10.224
-  center_z: 2.051
-  size_x: 18.0
-  size_y: 18.0
-  size_z: 18.0
+  center_x: -18.566
+  center_y: -13.513
+  center_z: 4.557
+  size_x: 28.0
+  size_y: 27.306
+  size_z: 24.704
 
 pocket:
   contact_cutoff: 3.5
   residue_ids:
+    - "A:25"
+    - "A:26"
+    - "A:27"
     - "A:41"
+    - "A:46"
     - "A:49"
-    - "A:54"
     - "A:140"
     - "A:141"
     - "A:142"
@@ -25,16 +28,6 @@ pocket:
     - "A:164"
     - "A:165"
     - "A:166"
-    - "A:167"
-    - "A:168"
-    - "A:172"
     - "A:187"
     - "A:188"
     - "A:189"
-    - "A:190"
-    - "A:192"
-
-# Reference: Nirmatrelvir, ~-8.3 kcal/mol
-oracle:
-  affinity_threshold: -8.0
-  strain_threshold: 3.5

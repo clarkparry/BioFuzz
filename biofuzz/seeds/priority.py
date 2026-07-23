@@ -6,21 +6,34 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 
 RDLogger.DisableLog("rdApp.*")
 
-TARGET_SPECIFIC_BONUS = 5.0
 MW_REFERENCE = 350.0  # midpoint of the seeds.md drug-likeness MW band
 MW_BONUS_SCALE = 2.0
 LOGP_BONUS_SCALE = 1.0
 SCAFFOLD_DIVERSITY_BONUS = 3.0
+# Half-width of the MW band, in daltons. A seed at MW_REFERENCE scores full
+# marks; one MW_TOLERANCE away scores zero.
+MW_TOLERANCE = 200.0
 
 
 def base_affinity_estimate(smiles: str) -> float:
+    """Prior on a seed's worth, before anything has been docked.
+
+    The MW term is deliberately a band centred on MW_REFERENCE, not a reward
+    for being heavy. It used to be `max(0, (mw - 350) / 100) * 2`, which grows
+    without bound with molecular weight: the heaviest seed in the file always
+    got popped first. That compounds with docking's own size bias -- raw
+    affinity already scales with heavy-atom count -- so the campaign started
+    from the biggest molecule available and its hits were all MW-500+ Lipinski
+    violators. Ranking on closeness to the middle of the drug-like band instead
+    lets small, ligand-efficient seeds compete.
+    """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return 0.0
     mw = Descriptors.MolWt(mol)
     logp = Descriptors.MolLogP(mol)
 
-    mw_bonus = max(0.0, (mw - MW_REFERENCE) / 100.0) * MW_BONUS_SCALE
+    mw_bonus = max(0.0, 1.0 - abs(mw - MW_REFERENCE) / MW_TOLERANCE) * MW_BONUS_SCALE
     logp_bonus = max(0.0, (3.0 - logp) / 3.0) * LOGP_BONUS_SCALE
     return mw_bonus + logp_bonus
 
@@ -40,12 +53,9 @@ def scaffold_diversity_bonus(smiles: str, corpus_scaffold_counts: dict[str, int]
 
 def compute_seed_priority(
     smiles: str,
-    target_specific: bool = False,
     corpus_scaffold_counts: dict[str, int] | None = None,
 ) -> float:
     priority = base_affinity_estimate(smiles) + scaffold_diversity_bonus(
         smiles, corpus_scaffold_counts
     )
-    if target_specific:
-        priority += TARGET_SPECIFIC_BONUS
     return max(0.1, priority)

@@ -7,7 +7,7 @@ from biofuzz.storage.checkpoint import (
 )
 from biofuzz.storage.findings import FindingsStore
 from biofuzz.storage.log import FuzzerLog
-from biofuzz.storage.paths import RunLayout, make_run_dir
+from biofuzz.storage.paths import RunLayout, make_run_dir, open_run_dir
 
 __all__ = [
     "FindingsStore",
@@ -15,6 +15,7 @@ __all__ = [
     "FuzzerLog",
     "RunLayout",
     "make_run_dir",
+    "open_run_dir",
     "save_checkpoint",
     "load_checkpoint",
     "load_coverage_checkpoint",

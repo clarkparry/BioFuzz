@@ -19,19 +19,18 @@ def test_approved_drugs_build_criterion():
     assert len(smiles_set) == len(seeds), "Duplicate SMILES in seed file"
 
 
-def test_per_target_seed_files_exist_and_are_valid():
+def test_no_per_target_inhibitor_seeds_are_bundled():
+    """A target's known inhibitor must not be injected into the corpus.
+
+    Discovery may not be handed its own answer. There is no seeds/per_target/
+    tree any more; the only seed source is the target-agnostic approved-drug
+    set. If a known binder is to be a seed it has to earn a place in
+    seeds/approved_drugs.smi and then competes at the ordinary drug-likeness
+    prior, with no special weight.
+    """
     import os
 
-    for target in ["hiv_protease", "egfr_kinase", "parp1", "sars_cov2_mpro", "braf_v600e"]:
-        target_dir = f"seeds/per_target/{target}"
-        assert os.path.isdir(target_dir)
-        files = os.listdir(target_dir)
-        assert len(files) >= 1
-        for f in files:
-            seeds = load_seeds(f"{target_dir}/{f}")
-            assert len(seeds) >= 1
-            for smiles, _ in seeds:
-                assert Chem.MolFromSmiles(smiles) is not None
+    assert not os.path.exists("seeds/per_target")
 
 
 def test_load_seeds_parses_whitespace_format(tmp_path):
@@ -53,10 +52,17 @@ def test_load_seeds_defaults_id_to_smiles_when_missing(tmp_path):
     assert seeds == [("CCO", "CCO")]
 
 
-def test_target_specific_seeds_get_priority_bonus():
-    generic = compute_seed_priority("CC(=O)Oc1ccccc1C(=O)O", target_specific=False)
-    specific = compute_seed_priority("CC(=O)Oc1ccccc1C(=O)O", target_specific=True)
-    assert specific > generic
+def test_seed_priority_takes_no_target_specific_flag():
+    """The target_specific priority boost is gone.
+
+    It used to add a flat +5.0 so a target's own inhibitor floated to the top
+    of the queue and was docked first. compute_seed_priority no longer accepts
+    the flag at all, so no seed can be privileged for being the known answer.
+    """
+    import inspect
+
+    params = inspect.signature(compute_seed_priority).parameters
+    assert "target_specific" not in params
 
 
 def test_scaffold_diversity_bonus_decreases_with_repetition():

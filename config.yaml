@@ -1,7 +1,14 @@
 # Global defaults -- overridden per target
 docking:
-  exhaustiveness_fuzz: 4
+  # 8, raised from 4. At exhaustiveness 4 a single dock is noisy enough to
+  # manufacture hits: findings from one reference campaign moved by up to
+  # 1.95 kcal/mol when re-docked, enough to flip them below the threshold.
+  exhaustiveness_fuzz: 8
   exhaustiveness_confirm: 16
+  # Per-dock wall-clock ceiling. Comfortable for cnn_model_fuzz: fast; gnina's
+  # full model ensemble takes ~97s per dock on an idle CPU here, so raise this
+  # if you set cnn_model_fuzz to null.
+  timeout_seconds: 300
   # CNN model for gnina's pose/affinity scoring pass. "fast" uses a single
   # lightweight model (~5x faster on CPU); null omits --cnn entirely, which
   # falls back to gnina's default full model ensemble (slower, most accurate).
@@ -11,11 +18,72 @@ docking:
   engine: gnina
 
 oracle:
+  # Single reference-free affinity gate applied to every target. It is NOT
+  # derived from any known inhibitor -- targets used to ship their own
+  # affinity_threshold measured from where their reference drug docks, and that
+  # reliance has been removed. This is a conventional consensus-score cutoff; the
+  # reference-free quality tiers below (ligand efficiency, CNN pose confidence,
+  # vina/CNN consensus) are the sharper discriminators of a real binding event.
+  # An absolute score gate is inherently coarse without a per-target anchor -- if
+  # you want a per-target notion of "good", prefer a rank/percentile selection in
+  # triage over hand-setting this number back to a specific drug.
   affinity_threshold: -9.0
+  # Intramolecular (strain) energy ceiling, kcal/mol. Sourced from gnina's
+  # "intramol" table column.
   strain_threshold: 3.5
-  selectivity_ratio_min: 2.0
-  selectivity_policy: fail_open
 
+  # How vina's empirical score and gnina's CNN prediction combine into the one
+  # number the oracle gates on. See biofuzz/oracle/scoring.py.
+  #   vina      -- empirical score only
+  #   cnn       -- CNN prediction only (converted pKd -> kcal/mol)
+  #   consensus -- the weaker of the two; a molecule must convince both
+  # "consensus" is the default because either function alone produces false
+  # positives that the other rejects, and requiring agreement is what kept the
+  # reference campaign's hits from surviving re-docking.
+  scoring_policy: consensus
+
+  # Minimum ligand efficiency, kcal/mol per heavy atom. Docking scores grow with
+  # molecular size, so an affinity-only gate selects for big greasy molecules --
+  # every hit in the reference campaign was flagged low_ligand_efficiency and a
+  # Lipinski MW violator. Set to null to disable.
+  #
+  # 0.22, not the textbook 0.3, so the gate does not reject whole classes of real
+  # drug. Approved drugs span roughly LE 0.25 (peptidomimetics like nirmatrelvir
+  # and indinavir, which are legitimately LE-poor) to 0.37 (fragment-like
+  # inhibitors such as talazoparib); a 0.3 floor rejects the LE-poor end. This
+  # floor is a fixed drug-likeness default, reference-free at runtime -- it does
+  # not consult any known inhibitor of the target being fuzzed.
+  min_ligand_efficiency: 0.22
+
+  # Minimum gnina CNN pose confidence, 0-1: does the network believe this is a
+  # real binding mode? This is the sharpest tier available. All five reference
+  # drugs score 0.80-0.97, while poses from the reference campaign's mutant
+  # chemistry score ~0.32, so 0.4 separates them with room on both sides.
+  # Set to null to disable.
+  min_cnn_pose_score: 0.4
+
+  # Optional: reject when vina and the CNN disagree by more than this many
+  # kcal/mol. null disables the tier (the consensus policy already handles the
+  # common case).
+  max_score_disagreement: null
+
+triage:
+  # Selectivity is a free-energy *difference*, kcal/mol (positive = prefers the
+  # on-target). 1.4 kcal/mol is one log unit of Kd, ~10x selective.
+  selectivity_min_ddg: 1.4
+
+# Property bounds for generated chemistry. Applied at molecule preparation, so
+# anything outside them is dropped before docking.
+#
+# OVERRIDE THESE PER-TARGET whenever the target's known drugs fall outside them.
+# Viable chemical space is a property of the target, not a global constant: this
+# envelope rejects indinavir (614 Da) and vemurafenib (logP 5.54), which are the
+# reference drugs for hiv_protease and braf_v600e, so both targets set their own
+# bounds in targets/<name>/config.yaml. Excluding a target's own drug class means
+# no campaign against it can find anything resembling what works.
+#
+# The oracle's min_ligand_efficiency, not a blanket MW cap, is what keeps size
+# honest -- it asks what the extra atoms are buying.
 molecules:
   max_mw: 550
   max_logp: 5.0
@@ -27,6 +95,10 @@ corpus:
   priority_new_bit_weight: 10.0
   priority_affinity_weight: 1.0
   priority_reuse_penalty: 0.1
+  # Penalty scale for scaffolds already crowding the corpus, applied as
+  # weight * log2(entries sharing the scaffold). This is what stops the queue
+  # collapsing onto a single chemical series.
+  priority_scaffold_penalty: 3.0
 
 coverage:
   enabled: true
@@ -40,5 +112,9 @@ coverage:
 
 fuzzer:
   workers: 4
+  # Checkpoint on whichever comes first: this many iterations, or this many
+  # seconds. One iteration is a whole batch of docks, so on CPU the iteration
+  # count alone can mean hours between checkpoints.
   checkpoint_every: 500
+  checkpoint_every_seconds: 300
   log_level: INFO

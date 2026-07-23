@@ -4,6 +4,10 @@ Coverage-guided fuzzing applied to molecular docking. The protein is the program
 
 Full architecture, module boundaries, and data flow are documented in [`BIOFUZZ_STRUCTURE.md`](BIOFUZZ_STRUCTURE.md). Each module's detailed design lives in [`docs/modules/`](docs/modules/).
 
+A July 2026 in-depth evaluation against a real campaign, and the changes made in
+response, are in [`docs/evaluation_2026-07.md`](docs/evaluation_2026-07.md) and
+[`docs/improvements_2026-07.md`](docs/improvements_2026-07.md).
+
 ## Layout
 
 ```
@@ -38,12 +42,29 @@ Steps 2 and 3 are one-time setup: their outputs (`.tools/bin/`, `targets/*/prote
 ## Usage
 
 ```sh
-# Run a fuzzing campaign against a target
+# Run a fuzzing campaign against a target (Ctrl-C to stop; checkpoints every 5 min)
 ./biofuzz-fuzz --target hiv_protease
+
+# Continue an interrupted campaign with its corpus, coverage and findings intact
+./biofuzz-fuzz --target hiv_protease --resume runs/<stamp>_hiv_protease
 
 # Triage the findings from a completed run
 ./biofuzz-triage --findings runs/<stamp>_hiv_protease/findings --target hiv_protease
 ```
+
+## The oracle is reference-free
+
+BioFuzz is meant to find binders for a protein you have no drug for, so the hit
+gate never consults a known inhibitor. There is one reference-free oracle in
+`config.yaml`, inherited by every target; no target ships a threshold measured
+from where its reference drug docks. The absolute affinity cutoff is coarse by
+design — the reference-free quality tiers (ligand efficiency, CNN pose
+confidence, vina/CNN consensus) are the real discriminators. See
+[`docs/modules/oracle.md`](docs/modules/oracle.md).
+
+The known inhibitors under `targets/<name>/reference_ligands/` are kept only as
+an optional *validation* set: dock them by hand to confirm the oracle is not so
+strict it would reject a real drug. They never feed the discovery loop.
 
 ## Tests
 

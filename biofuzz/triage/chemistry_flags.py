@@ -4,6 +4,7 @@ from rdkit import Chem
 from rdkit.Chem import Crippen
 from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 
+from biofuzz.mutator.alerts import unstable_motifs
 from biofuzz.triage.record import TriageRecord, TriageStageResult
 
 _PAINS_PARAMS = FilterCatalogParams()
@@ -49,6 +50,13 @@ class ChemistryFlagsStage:
         flags = []
         if _PAINS_CATALOG.HasMatch(mol):
             flags.append("pains_match")
+
+        # Chemically implausible motifs. The fuzzing loop rejects these outright
+        # now (biofuzz/mutator/alerts.py), so this should only ever fire on
+        # findings from a campaign that predates that gate -- which is exactly
+        # when a reader most needs to be told.
+        for motif in unstable_motifs(mol):
+            flags.append(f"unstable_motif:{motif}")
 
         for name, patt in _REACTIVE_MOLS.items():
             if patt is not None and mol.HasSubstructMatch(patt):

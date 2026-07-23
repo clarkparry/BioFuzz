@@ -5,10 +5,17 @@ import os
 from biofuzz.docker import DockingConfig
 from biofuzz.docker.gnina import GninaBackend
 from biofuzz.docker.parser import parse_log
+from biofuzz.oracle import best_mode
 from biofuzz.prep import prepare_smiles
 from biofuzz.triage.confirmation import DEFAULT_FILTER_KWARGS
 from biofuzz.triage.record import TriageRecord, TriageStageResult
 
+# Minimum ddG = offtarget - ontarget, in kcal/mol. 1.4 kcal/mol is one log unit
+# of affinity (~10x selectivity), the conventional floor for calling a compound
+# selective at all.
+DEFAULT_SELECTIVITY_MIN_DDG = 1.4
+
+# Retained only to interpret old configs that set a ratio threshold.
 DEFAULT_SELECTIVITY_RATIO_MIN = 2.0
 
 
@@ -18,12 +25,14 @@ class SelectivityStage:
     def __init__(
         self,
         exhaustiveness: int = 16,
-        timeout_seconds: int = 300,
+        timeout_seconds: int = 900,
         cnn_model: str | None = None,
+        scoring_policy: str = "consensus",
     ):
         self.exhaustiveness = exhaustiveness
         self.timeout_seconds = timeout_seconds
         self.cnn_model = cnn_model
+        self.scoring_policy = scoring_policy
 
     def analyze(self, record: TriageRecord, target_config: dict, **kwargs) -> TriageStageResult:
         offtarget_receptor = target_config.get("offtarget_receptor")
@@ -57,16 +66,34 @@ class SelectivityStage:
 
         try:
             modes = parse_log(result.log_text)
-            if not modes or modes[0].affinity == 0:
+            if not modes:
                 return TriageStageResult(fields={}, flags=["selectivity_skipped_unavailable"])
 
-            ratio = abs(record.confirmed_affinity) / abs(modes[0].affinity)
-            ratio_min = target_config.get("triage", {}).get(
-                "selectivity_ratio_min", DEFAULT_SELECTIVITY_RATIO_MIN
-            )
-            flags = ["selectivity_passed"] if ratio >= ratio_min else ["selectivity_low"]
+            _mode, scored = best_mode(modes, self.scoring_policy)
+            if scored is None:
+                return TriageStageResult(fields={}, flags=["selectivity_skipped_unavailable"])
+            offtarget_affinity = scored.score
 
-            return TriageStageResult(fields=dict(selectivity_ratio=ratio), flags=flags)
+            # Selectivity is a *difference* of binding free energies, not a
+            # ratio of them. Both numbers are kcal/mol on a log scale, so their
+            # ratio has no physical meaning -- dividing -10 by -5 to get "2x
+            # selective" is a unit error; the real gap is 5 kcal/mol, ~4000x in
+            # Kd. ddG > 0 means the compound prefers the on-target.
+            ddg = offtarget_affinity - record.confirmed_affinity
+
+            triage_cfg = target_config.get("triage", {})
+            min_ddg = triage_cfg.get("selectivity_min_ddg", DEFAULT_SELECTIVITY_MIN_DDG)
+            flags = ["selectivity_passed"] if ddg >= min_ddg else ["selectivity_low"]
+
+            return TriageStageResult(
+                fields=dict(
+                    selectivity_ddg=ddg,
+                    offtarget_affinity=offtarget_affinity,
+                    # Kd fold-selectivity, the number a chemist actually quotes.
+                    selectivity_fold=10 ** (ddg / 1.364),
+                ),
+                flags=flags,
+            )
         finally:
             if result.pose_path and os.path.exists(result.pose_path):
                 os.unlink(result.pose_path)
