@@ -32,12 +32,16 @@ pip install -r requirements.txt
 # 2. Install the GNINA docking engine (downloads to .tools/bin/gnina)
 python .agent/tools/install_gnina.py
 
-# 3. Build target fixtures — fetches structures from RCSB and prepares the
-#    receptor + reference ligand PDBQTs under targets/<name>/
+# 3. Install P2Rank, the ligand-free pocket detector (downloads to .tools/p2rank/).
+#    Needs a system Java >= 11 (JAVA_HOME or `java` on PATH); no JRE is bundled.
+python .agent/tools/install_p2rank.py
+
+# 4. Build target fixtures — fetches structures from RCSB, prepares the receptor,
+#    and derives each target's box + pocket from P2Rank (no reference inhibitor).
 python .agent/tools/prepare_target_fixture.py
 ```
 
-Steps 2 and 3 are one-time setup: their outputs (`.tools/bin/`, `targets/*/protein.pdbqt`, `targets/*/reference_ligands/*.pdbqt`) are gitignored and must be rebuilt after every fresh clone. To add a target beyond the five bundled ones, see [`docs/adding_targets.md`](docs/adding_targets.md).
+Steps 2–4 are one-time setup: their outputs (`.tools/bin/`, `.tools/p2rank/`, `targets/*/protein.pdbqt`, `targets/*/config.yaml` box/pocket, and the optional `targets/*/reference_ligands/*.pdbqt` validation set) are gitignored and must be rebuilt after every fresh clone. **Java (>= 11) is an external prerequisite** for P2Rank and is not installed by these scripts. To add a target beyond the five bundled ones, see [`docs/adding_targets.md`](docs/adding_targets.md).
 
 ## Usage
 

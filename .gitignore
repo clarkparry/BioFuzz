@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .tools/bin/
+.tools/p2rank/
 
 runs/
 amp.log

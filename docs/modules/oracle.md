@@ -12,7 +12,7 @@ The AFL++ equivalent is the crash signal: AFL doesn't try to analyze whether a c
 
 **Does:**
 - Reduce a docking result to one score under a configurable scoring policy
-- Check that score against a per-target threshold
+- Check that score against the global reference-free affinity threshold
 - Check internal strain energy (the engine's intramolecular term)
 - Check ligand efficiency, so raw score can't select on molecular size alone
 - Check the engine's own pose confidence, where it reports one

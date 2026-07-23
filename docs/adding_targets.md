@@ -10,9 +10,12 @@ to find binders for a protein you have no drug for, so the site it searches must
 be a property of the protein. A known inhibitor is never required, and never
 shapes the box, the pocket, or the coverage map.
 
-**Prerequisite:** install [P2Rank](https://github.com/rdk/p2rank) and put `prank`
-on your PATH (or set `$P2RANK`). It needs Java. Without it the builder cannot
-derive a box or pocket.
+**Prerequisite:** install P2Rank with `python .agent/tools/install_p2rank.py`
+(it downloads to `.tools/p2rank/`, which the builder finds automatically). P2Rank
+needs a system Java >= 11 — `JAVA_HOME` or `java` on PATH — which the installer
+does *not* provide. If you already have P2Rank elsewhere, putting `prank` on PATH
+or setting `$P2RANK` works too. Without it the builder cannot derive a box or
+pocket.
 
 ## 1. Find a source structure
 

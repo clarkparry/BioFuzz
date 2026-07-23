@@ -1,5 +1,14 @@
 # BioFuzz Improvements — July 2026
 
+> **Superseded in part (post-July-2026).** The known-inhibitor reliance these
+> changes still assumed has since been removed: target-specific seeds and their
+> priority bonus, the reference-measured per-target `affinity_threshold` (and
+> `scripts/calibrate_oracle.py`), and the ligand-derived box/pocket. Boxes and
+> pockets are now detected ligand-free with P2Rank and the oracle is
+> reference-free. Sections G1/G2/D2 below describing per-target measured
+> thresholds or `calibrate_oracle.py` are historical; see
+> [`adding_targets.md`](adding_targets.md) and [`modules/oracle.md`](modules/oracle.md).
+
 Changes made in response to [`docs/evaluation_2026-07.md`](evaluation_2026-07.md).
 Section letters below match the finding they address.
 

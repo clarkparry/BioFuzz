@@ -192,15 +192,25 @@ class Pocket:
     residues: list[str]  # residue_key form, e.g. "A:123"
 
 
+# Repo-local install written by .agent/tools/install_p2rank.py, mirroring how the
+# gnina backend falls back to .tools/bin/gnina.
+_REPO_LOCAL_P2RANK = REPO_ROOT / ".tools" / "p2rank" / "prank"
+
+
 def _resolve_p2rank() -> str:
-    candidates = [os.environ.get("P2RANK"), "prank", "p2rank"]
-    for candidate in candidates:
-        if candidate and shutil.which(candidate):
-            return shutil.which(candidate)
+    explicit = os.environ.get("P2RANK")
+    if explicit and shutil.which(explicit):
+        return shutil.which(explicit)
+    for name in ("prank", "p2rank"):
+        found = shutil.which(name)
+        if found:
+            return found
+    if _REPO_LOCAL_P2RANK.exists() and os.access(_REPO_LOCAL_P2RANK, os.X_OK):
+        return str(_REPO_LOCAL_P2RANK)
     raise RuntimeError(
         "P2Rank not found. The docking box and pocket residues are derived from a "
-        "ligand-free pocket detector, not from a co-crystal ligand. Install P2Rank "
-        "(https://github.com/rdk/p2rank), then put `prank` on PATH or set $P2RANK."
+        "ligand-free pocket detector, not from a co-crystal ligand. Install it with "
+        "`python .agent/tools/install_p2rank.py`, or put `prank` on PATH / set $P2RANK."
     )
 
 

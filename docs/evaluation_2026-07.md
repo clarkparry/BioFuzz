@@ -1,5 +1,16 @@
 # BioFuzz Evaluation — July 2026
 
+> **Superseded in part (post-July-2026).** BioFuzz's reliance on each target's
+> known inhibitor has since been removed: target-specific seeds and their
+> `TARGET_SPECIFIC_BONUS`, the reference-derived per-target `affinity_threshold`
+> (and `scripts/calibrate_oracle.py`), and the ligand-derived docking box/pocket
+> are all gone. Boxes and pockets now come from ligand-free pocket detection
+> (P2Rank) and the oracle is reference-free. Passages below that describe
+> `seeds/per_target/`, `TARGET_SPECIFIC_BONUS`, `calibrate_oracle.py`, or setting
+> a threshold from a reference drug are kept as a record of that period; for
+> current behavior see [`adding_targets.md`](adding_targets.md) and
+> [`modules/oracle.md`](modules/oracle.md).
+
 An in-depth review of BioFuzz against its stated goal: *quickly and effectively use
 fuzzing-based techniques to find new drugs or new purposes for old drugs.*
 

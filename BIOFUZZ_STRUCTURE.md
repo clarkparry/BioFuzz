@@ -47,12 +47,12 @@ BioFuzz/
 ├── docs/
 │   └── modules/      # Per-module design documents (this directory)
 ├── seeds/
-│   ├── approved_drugs.smi    # Curated FDA-approved small molecule SMILES
-│   └── per_target/           # Target-specific known binders
+│   └── approved_drugs.smi    # Curated FDA-approved small molecule SMILES
 ├── targets/
 │   └── <name>/
-│       ├── protein.pdbqt     # Prepared receptor
-│       └── config.yaml       # Box, pocket, oracle thresholds
+│       ├── protein.pdbqt        # Prepared receptor
+│       ├── reference_ligands/   # Optional: known binders, for oracle validation only
+│       └── config.yaml          # Box + pocket (both ligand-free, from pocket detection)
 ├── runs/
 │   └── <stamp>_<target>/
 │       ├── findings/         # Hit pose + metadata per find

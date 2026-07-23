@@ -139,16 +139,19 @@ was tried and rejected for the in-loop gate — it flags aspirin and every anili
 PAINS/BRENK belong in triage, where a flag is advisory. See
 `docs/evaluation_2026-07.md` §D1.
 
-### Bounds are per-target, and they must admit the target's own drug
+### Bounds are per-target, and they must admit the target's chemical class
 
 Filter parameters come from the caller (`molecules:` in config, overlaid
-per-target). **Set them from the target's known chemistry.** A global 550 Da /
-logP 5.0 envelope rejects indinavir (614 Da) and vemurafenib (logP 5.54) — two of
-five bundled reference drugs — at the preparation step, silently, which excludes
-the entire chemical class that works on those targets. Ligand efficiency, not a
-blanket MW cap, is the instrument for keeping size honest: it asks what the extra
-atoms buy. `tests/test_calibration.py` asserts every target can prepare its own
-reference drug. See `docs/evaluation_2026-07.md` §D2.
+per-target). **Set them from the chemical class that binds the target.** A global
+550 Da / logP 5.0 envelope rejects, e.g., peptidomimetic protease inhibitors
+(600–720 Da) and lipophilic type-II kinase inhibitors (logP > 5) — whole classes
+— at the preparation step, silently, before docking. This is a chemical-space
+bound, not a known-inhibitor dependency: nothing is seeded or scored against a
+specific drug. Ligand efficiency, not a blanket MW cap, is the instrument for
+keeping size honest: it asks what the extra atoms buy. Where a target ships a
+validation reference drug, `tests/test_calibration.py` checks the target's bounds
+can at least prepare it — a guard against bounds that exclude the target's class.
+See `docs/evaluation_2026-07.md` §D2.
 
 ---
 

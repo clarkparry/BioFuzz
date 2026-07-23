@@ -1,5 +1,14 @@
 # BioFuzz Rebuild — Implementation Log
 
+> **Superseded in part (post-July-2026).** Log entries below describe loading
+> `seeds/per_target/<target>/*.smi` with a target-specific bonus and deriving
+> per-target oracle thresholds via `scripts/calibrate_oracle.py`. That reliance on
+> each target's known inhibitor has since been removed — seeds are the
+> target-agnostic set only, the oracle is reference-free, and boxes/pockets are
+> detected ligand-free with P2Rank. These entries are kept as a build record; see
+> [`adding_targets.md`](adding_targets.md) and [`modules/oracle.md`](modules/oracle.md)
+> for current behavior.
+
 Running record of the ground-up rebuild against `BIOFUZZ_STRUCTURE.md` and `docs/modules/*.md`. Updated after each build wave. Plan reference: modular subagent waves, see conversation/plan history for the original wave design.
 
 ## Wave 0 — Prep and environment setup

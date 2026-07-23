@@ -152,7 +152,7 @@ config = DockingConfig(
     size_x=20.0, size_y=20.0, size_z=20.0,
     exhaustiveness=4, num_modes=3, timeout_seconds=120,
 )
-indinavir_pdbqt = open("seeds/per_target/hiv_protease/indinavir.pdbqt").read()
+indinavir_pdbqt = open("targets/hiv_protease/reference_ligands/indinavir.pdbqt").read()
 
 result = backend.dock(indinavir_pdbqt, config)
 assert result.success
