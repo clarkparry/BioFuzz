@@ -67,6 +67,7 @@ class FindingsStore:
         scoring_policy: str | None = None,
         novelty_class: str | None = None,
         new_coverage_bits: int | None = None,
+        essential_contacts: int | None = None,
         dedupe: bool = True,
     ) -> Path | None:
         """Persist a hit. Returns None when `dedupe` suppressed a repeat.
@@ -108,6 +109,7 @@ class FindingsStore:
             "scoring_policy": scoring_policy,
             "novelty_class": novelty_class,
             "new_coverage_bits": new_coverage_bits,
+            "essential_contacts": essential_contacts,
         }
         (finding_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
         self._seen_smiles.add(smiles)

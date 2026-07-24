@@ -74,6 +74,12 @@ This downloads the structure from RCSB, then automatically:
   the coverage fingerprint hashes contacts into) and derives the box from the
   pocket: center = P2Rank pocket center, size = pocket-residue extent + 8 Å
   padding, clamped to 18–28 Å
+- writes a small `pocket.essential_residue_ids` set — the residues a real binder
+  must engage, ranked from receptor burial + polar character and blended with
+  P2Rank's per-residue ligandability. Derived from the protein alone, never from
+  an inhibitor; the oracle's essential-contact tier gates on it (see
+  `docs/modules/oracle.md` "Tier 6"). Omitting it is harmless: the campaign
+  rederives the same structural set at startup.
 - if `ligand_code`/`inhibitor_name` are set, emits an optional
   `reference_ligands/` entry (validation only — see step 4)
 
@@ -129,7 +135,10 @@ flexible element. Two mitigations:
 - For a site a rigid-pocket detector genuinely can't capture — e.g. HIV-1
   protease's active site sits at the A/B dimer interface behind mobile flaps —
   hand-curate `config.yaml` and mark its first line `# hand-curated` so re-runs
-  won't overwrite it. `targets/hiv_protease/` is done this way.
+  won't overwrite it. `targets/hiv_protease/` is done this way. A hand-curated
+  config may omit `pocket.essential_residue_ids`; the campaign rederives the
+  structure-only essential set at startup (for hiv_protease it recovers the
+  catalytic aspartate dyad, A:25/B:25, unaided).
 
 Always eyeball the generated box against the structure in a viewer before
 trusting it.

@@ -163,6 +163,53 @@ def test_verdict_carries_per_function_detail():
     assert verdict.heavy_atom_count == 3
 
 
+def test_essential_contact_tier_rejects_wrong_pocket_pose():
+    """A pose can score well yet engage none of the must-touch residues."""
+    cfg = OracleConfig(
+        affinity_threshold=-9.0,
+        strain_threshold=3.5,
+        min_ligand_efficiency=None,
+        min_cnn_pose_score=None,
+        min_essential_contacts=1,
+    )
+    modes = [DockingMode(mode=1, affinity=-10.5)]
+
+    missed = evaluate(modes, "", cfg, essential_contacts=0)
+    assert not missed.is_hit
+    assert "essential-residue contacts" in missed.notes
+
+    engaged = evaluate(modes, "", cfg, essential_contacts=1)
+    assert engaged.is_hit
+    assert "essential_contact" in engaged.passed_tiers
+    assert engaged.essential_contacts == 1
+
+
+def test_essential_contact_tier_skipped_without_a_count():
+    """No count (tier not gating for this target) -> skip, don't fail."""
+    cfg = OracleConfig(
+        affinity_threshold=-9.0,
+        strain_threshold=3.5,
+        min_ligand_efficiency=None,
+        min_cnn_pose_score=None,
+        min_essential_contacts=1,
+    )
+    verdict = evaluate([DockingMode(mode=1, affinity=-10.5)], "", cfg, essential_contacts=None)
+    assert verdict.is_hit
+    assert "essential_contact" not in verdict.passed_tiers
+
+
+def test_essential_contact_tier_disabled_by_none():
+    cfg = OracleConfig(
+        affinity_threshold=-9.0,
+        strain_threshold=3.5,
+        min_ligand_efficiency=None,
+        min_cnn_pose_score=None,
+        min_essential_contacts=None,
+    )
+    verdict = evaluate([DockingMode(mode=1, affinity=-10.5)], "", cfg, essential_contacts=0)
+    assert verdict.is_hit
+
+
 def test_max_score_disagreement_tier():
     cfg = OracleConfig(
         affinity_threshold=-9.0,

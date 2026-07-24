@@ -251,3 +251,51 @@ scaffold; one iteration of this one produces two plausible leads against a
 stricter oracle.
 
 Tests 92 → 149, all passing; suite runtime ~6m40s → ~4m30s.
+
+## Wave 6 — Essential-residue oracle tier (structure-only "where does it bind")
+
+Every oracle tier to this point is a *scalar* — how tightly a pose scores, never
+*where* it binds. A molecule can clear affinity, strain, ligand efficiency, and
+CNN pose confidence while sitting in the wrong sub-pocket, making none of the
+contacts that define the site. This wave adds the geometric check, and does it
+**from the protein alone** — no known inhibitor, and no need to know what the
+protein is (the guiding constraint the user set).
+
+**New module `biofuzz/protein/essential.py`** composes three structure-only
+signals into a small "must-engage" residue set:
+
+- **Structural (Route B, always available):** rank pocket residues by burial
+  (deep = anchor point a ligand must reach) + polar/ionizable character (a buried
+  charge is expensive, so it is functional). On `hiv_protease` treated as an
+  unknown protein, the top two residues are the catalytic aspartate dyad
+  (`A:25`/`B:25`) — recovered unaided. Validated in `tests/test_essential.py`
+  against the real receptor.
+- **Ligandability (Route A, prep-time):** `prepare_target_fixture.py` now parses
+  P2Rank's per-residue scores and z-blends them into the ranking, writing
+  `pocket.essential_residue_ids` into each target config.
+- **Emergent (Route C, runtime):** the campaign already docks seeds to calibrate
+  them; `EssentialResidues` tallies which pocket residues *confident* seed poses
+  converge on and unions them in — the AFL++ calibration analogy applied to
+  residues. Persisted to `essential.json` so it survives `--resume` (seeds are
+  already calibrated on resume and never re-docked, so the signal cannot be
+  rebuilt otherwise).
+
+**The oracle stays pure.** Its Boundary forbids receptor/pocket knowledge, so the
+campaign (which owns the geometry) computes the per-pose essential-contact *count*
+and passes it into `evaluate()`, exactly as `heavy_atom_count` is passed for the
+LE tier. New `OracleConfig.min_essential_contacts` (default 1) and
+`OracleVerdict.essential_contacts`. The contact set is taken from the same
+`build_fingerprint` the coverage map uses — no new distance math.
+
+**The gate is soft by design:** tolerant (a pose need only reach one essential
+residue) and self-disabling (if no trustworthy set forms — no structure, empty
+pocket — the campaign passes no count and the tier is skipped, not failed, the
+same contract as the LE tier). The essential set encodes a hypothesis about *the*
+binding mode, a mild bias against novel/allosteric modes; keeping the set to
+genuine anchors and the gate tolerant bounds that cost.
+
+**Cleanup:** removed dead `DEFAULT_SELECTIVITY_RATIO_MIN` (defined, never read).
+
+Docs updated: `modules/oracle.md` (Tier 6 + interface), `adding_targets.md`
+(essential_residue_ids), `config.yaml` (new `oracle:` keys). Tests 149 → 163
+(new `tests/test_essential.py`, extended `tests/test_oracle.py`), all passing.

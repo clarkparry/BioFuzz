@@ -16,13 +16,18 @@ The AFL++ equivalent is the crash signal: AFL doesn't try to analyze whether a c
 - Check internal strain energy (the engine's intramolecular term)
 - Check ligand efficiency, so raw score can't select on molecular size alone
 - Check the engine's own pose confidence, where it reports one
+- Check that the pose *engages the essential residues* — where it binds, not just
+  how tightly — from a precomputed contact count the caller supplies
 - Return a structured verdict with which checks passed
 
 **Does not:**
 - Re-dock at higher exhaustiveness (Triage)
 - Check selectivity against off-targets (Triage)
 - Predict ADMET properties (Triage)
-- Cluster binding modes or assess pose geometry (Triage)
+- Cluster binding modes (Triage)
+- Compute pose geometry itself — the essential-residue *count* is worked out by
+  the caller (which owns the receptor) and passed in, exactly like
+  `heavy_atom_count`, so `evaluate()` stays a pure function of scalars
 - Filter for PAINS or reactive groups (Triage; the *mutator* rejects
   chemically implausible molecules before they are ever docked)
 - Know anything about coverage or the corpus
@@ -120,6 +125,49 @@ pose score.
 |vina - cnn| ≤ max_score_disagreement
 ```
 
+### Tier 6: Essential-Residue Engagement
+```
+essential_contacts ≥ min_essential_contacts   (default 1)
+```
+Every tier above is a *scalar*: it says how tightly a pose scores, never **where**
+it binds. A molecule can clear all of them while sitting in the wrong sub-pocket,
+making none of the contacts that define the site. This tier is the geometric
+check that catches that — and it is the answer to "how do we know a hit binds
+where it should without knowing anything about the protein?"
+
+The **essential set** is a small group of pocket residues a genuine binder must
+touch, derived from the protein alone (never from a known inhibitor). It composes
+three structure-only signals, computed in `biofuzz/protein/essential.py`:
+
+1. **Structural (always available).** Score each pocket residue by *burial*
+   (deep residues are the anchor points a ligand must reach) and *polar/ionizable
+   character* (a charged side chain buried in a pocket is expensive to bury, so
+   it is there for a reason). On HIV protease, treated as an unknown protein,
+   the top two residues this produces are the catalytic aspartate dyad
+   (A:25 / B:25) — recovered without ever naming them.
+2. **Ligandability (when a detector ran).** P2Rank's per-residue druggability,
+   blended into the ranking at target-prep time.
+3. **Emergent (accrues during the campaign).** BioFuzz docks its approved-drug
+   seeds to calibrate them; the pocket residues that many *confident* seed poses
+   all contact are, empirically, what this pocket demands. This half is
+   self-calibrating — the AFL++ calibration analogy applied to residues.
+
+The static half (1 + 2) is written to a target's `pocket.essential_residue_ids`
+by the prep tool; if absent (e.g. a hand-curated config), the campaign rederives
+the structural set at startup. The emergent half (3) unions in at runtime.
+
+**The gate is deliberately soft.** It is *tolerant* — a pose need only contact
+`min_essential_contacts` of the set (default 1, "reach the anchor at all"). And
+it *self-disables* per target: if no trustworthy set can be formed (no receptor,
+empty pocket), the caller passes no count and the tier is skipped, not failed —
+the same skip-don't-fail contract as the ligand-efficiency tier. This guards
+against gating on a wrong guess. If you would rather flag than reject, raise the
+finding and inspect `essential_contacts` in triage instead of enabling the gate.
+
+Because the essential set encodes a hypothesis about *the* binding mode, it is a
+mild bias against novel (e.g. allosteric) modes; keeping the set to genuine
+structural anchors and the gate tolerant is what bounds that cost.
+
 ---
 
 ## OracleVerdict
@@ -137,6 +185,8 @@ OracleVerdict:
   cnn_affinity_kcal: float | None # *why* it was called, not just that it was
   cnn_pose_score: float | None
   scoring_policy: str | None
+  essential_contacts: int | None  # essential residues this pose engaged, or
+                                  # None when the tier did not gate
 ```
 
 ---
@@ -148,8 +198,9 @@ evaluate(
     modes: list[DockingMode],
     pose_pdbqt: str,
     oracle_config: OracleConfig,
-    smiles: str | None = None,            # enables the ligand-efficiency tier
-    heavy_atom_count: int | None = None,  # ... or pass the count directly
+    smiles: str | None = None,             # enables the ligand-efficiency tier
+    heavy_atom_count: int | None = None,   # ... or pass the count directly
+    essential_contacts: int | None = None, # enables the essential-residue tier
 ) -> OracleVerdict
 ```
 
@@ -157,7 +208,10 @@ This is a pure function. The same inputs always produce the same verdict. It has
 no side effects and no external dependencies beyond its inputs.
 
 `smiles` is optional so callers without a structure keep working; without it (or
-`heavy_atom_count`) the LE tier is skipped rather than failed.
+`heavy_atom_count`) the LE tier is skipped rather than failed. `essential_contacts`
+is likewise optional: the caller (the campaign) owns the receptor, computes how
+many essential residues the pose engages, and passes the count; None skips the
+tier. This is what keeps geometry out of the oracle while still gating on it.
 
 `OracleConfig` contains only the thresholds — nothing about the target receptor
 or pocket.
@@ -170,6 +224,7 @@ OracleConfig:
   min_ligand_efficiency: float | None = 0.22 # None disables the tier
   min_cnn_pose_score: float | None = 0.4     # None disables the tier
   max_score_disagreement: float | None = None
+  min_essential_contacts: int | None = 1     # None disables the tier
 ```
 
 ---

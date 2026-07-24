@@ -67,6 +67,34 @@ oracle:
   # common case).
   max_score_disagreement: null
 
+  # Essential-residue tier: does the pose actually engage the part of the pocket
+  # a real binder must touch? The scalar tiers above say how *tightly* a pose
+  # scores; this is the only tier that checks *where* it binds, catching a
+  # well-scored pose that sits in the wrong sub-pocket. The essential set is
+  # derived from the protein alone -- receptor burial + polar character, blended
+  # with P2Rank ligandability at prep time, and refined at runtime by which
+  # residues confident seed poses converge on. It never consults a known
+  # inhibitor. See biofuzz/protein/essential.py and docs/modules/oracle.md.
+  #
+  # Minimum essential residues a pose must contact to pass. Deliberately
+  # tolerant: 1 asks only that the pose reaches the anchor at all. null disables
+  # the tier. The tier also self-disables per-target when no trustworthy
+  # essential set can be formed (no structure, empty pocket), skipping rather
+  # than rejecting on noise.
+  min_essential_contacts: 1
+  # How many top-ranked pocket residues form the structure-derived static set,
+  # when a target's config does not pin its own pocket.essential_residue_ids.
+  essential_static_count: 4
+  # Emergent (self-calibrating) half: a pocket residue joins the set once this
+  # fraction of confident seed poses have contacted it, but only after at least
+  # essential_emergent_min_poses such poses exist, and only poses with CNN
+  # confidence >= essential_emergent_min_pose_score get a vote.
+  essential_emergent_fraction: 0.6
+  essential_emergent_min_poses: 3
+  essential_emergent_min_pose_score: 0.6
+  # Ceiling on the gated set, so the tolerant "engage >= 1" gate stays selective.
+  essential_max_active: 6
+
 triage:
   # Selectivity is a free-energy *difference*, kcal/mol (positive = prefers the
   # on-target). 1.4 kcal/mol is one log unit of Kd, ~10x selective.

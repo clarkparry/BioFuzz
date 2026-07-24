@@ -39,6 +39,13 @@ class OracleConfig:
     min_cnn_pose_score: float | None = 0.4
     # Max allowed |vina - CNN| disagreement in kcal/mol. None disables the tier.
     max_score_disagreement: float | None = None
+    # Minimum number of the target's essential (structure-derived) pocket
+    # residues the pose must contact. None disables the tier. The essential set
+    # and the per-pose contact count are computed by the campaign, which owns the
+    # receptor geometry; the oracle only compares the count it is handed against
+    # this floor, so it stays a pure function of its inputs. See
+    # biofuzz/protein/essential.py and docs/modules/oracle.md "Tier 6".
+    min_essential_contacts: int | None = 1
 
 
 @dataclass
@@ -54,6 +61,7 @@ class OracleVerdict:
     cnn_affinity_kcal: float | None = None
     cnn_pose_score: float | None = None
     scoring_policy: str | None = None
+    essential_contacts: int | None = None
 
 
 def extract_strain(pose_pdbqt: str) -> float | None:
@@ -92,12 +100,19 @@ def evaluate(
     oracle_config: OracleConfig,
     smiles: str | None = None,
     heavy_atom_count: int | None = None,
+    essential_contacts: int | None = None,
 ) -> OracleVerdict:
     """Gate a docking result into hit / no-hit.
 
     `smiles` (or a precomputed `heavy_atom_count`) enables the ligand-efficiency
     tier. Without either, LE cannot be computed and that tier is skipped rather
     than failed, so callers that don't have the structure still work.
+
+    `essential_contacts` is how many of the target's essential pocket residues
+    this pose touches, computed by the caller (which owns the receptor geometry).
+    Passing None -- because the tier is disabled, or no trustworthy essential set
+    exists yet -- skips the tier rather than failing it, keeping evaluate() a pure
+    function of the numbers it is handed.
     """
     policy = oracle_config.scoring_policy
     if not modes:
@@ -168,6 +183,15 @@ def evaluate(
                     f"> maximum {oracle_config.max_score_disagreement}"
                 )
 
+    if oracle_config.min_essential_contacts is not None and essential_contacts is not None:
+        if essential_contacts >= oracle_config.min_essential_contacts:
+            passed_tiers.append("essential_contact")
+        else:
+            failure_reasons.append(
+                f"essential-residue contacts {essential_contacts} "
+                f"< minimum {oracle_config.min_essential_contacts}"
+            )
+
     is_hit = not failure_reasons
     notes = "passed" if is_hit else "; ".join(failure_reasons)
 
@@ -183,6 +207,7 @@ def evaluate(
         cnn_affinity_kcal=scored.cnn_affinity_kcal,
         cnn_pose_score=scored.cnn_pose_score,
         scoring_policy=policy,
+        essential_contacts=essential_contacts,
     )
 
 

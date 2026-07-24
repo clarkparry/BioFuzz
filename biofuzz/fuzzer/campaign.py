@@ -11,6 +11,7 @@ from biofuzz.corpus import Corpus, CorpusEntry
 from biofuzz.corpus import mutation_budget as compute_mutation_budget
 from biofuzz.corpus import select_stage
 from biofuzz.coverage import CoverageMap
+from biofuzz.coverage.fingerprint import build_fingerprint
 from biofuzz.docker import DockingConfig
 from biofuzz.docker.gnina import GninaBackend
 from biofuzz.docker.parser import parse_log, parse_pose
@@ -20,15 +21,21 @@ from biofuzz.mutator import mutate_with_metadata
 from biofuzz.mutator.entry import MutationCandidate
 from biofuzz.oracle import OracleConfig, evaluate
 from biofuzz.prep import prepare_smiles
-from biofuzz.protein import parse_receptor_residues
+from biofuzz.protein import (
+    EssentialResidues,
+    parse_receptor_residues,
+    select_static_essential,
+)
 from biofuzz.seeds import compute_seed_priority, load_seeds
 from biofuzz.storage import (
     CheckpointVersionError,
     FindingsStore,
     FuzzerLog,
     PDBQTCache,
+    load_checkpoint,
     make_run_dir,
     open_run_dir,
+    save_checkpoint,
 )
 
 
@@ -119,10 +126,13 @@ class Campaign:
 
         self.receptor_path = str(Path("targets") / target_name / target_config["receptor"])
         pocket_residue_ids = set(target_config["pocket"]["residue_ids"])
+        self.pocket_contact_cutoff = target_config["pocket"].get("contact_cutoff", 3.5)
         self.protein_residues = parse_receptor_residues(self.receptor_path, pocket_residue_ids)
 
         self.docking_config = self._build_docking_config(target_config, global_config)
         self.oracle_config = self._build_oracle_config(target_config, global_config)
+        self.essential = self._build_essential(target_config, global_config, pocket_residue_ids)
+        self._essential_path = self.layout.coverage_path.parent / "essential.json"
 
         self._start_time = time.time()
         self._last_checkpoint_time = self._start_time
@@ -164,9 +174,14 @@ class Campaign:
             cnn_model=docking_cfg.get("cnn_model_fuzz", "fast"),
         )
 
-    def _build_oracle_config(self, target_config: dict, global_config: dict) -> OracleConfig:
+    @staticmethod
+    def _merged_oracle_cfg(target_config: dict, global_config: dict) -> dict:
         oracle_cfg = dict(global_config.get("oracle", {}))
         oracle_cfg.update(target_config.get("oracle", {}))
+        return oracle_cfg
+
+    def _build_oracle_config(self, target_config: dict, global_config: dict) -> OracleConfig:
+        oracle_cfg = self._merged_oracle_cfg(target_config, global_config)
         return OracleConfig(
             affinity_threshold=oracle_cfg.get("affinity_threshold", -9.0),
             strain_threshold=oracle_cfg.get("strain_threshold", 3.5),
@@ -174,6 +189,47 @@ class Campaign:
             min_ligand_efficiency=oracle_cfg.get("min_ligand_efficiency", 0.22),
             min_cnn_pose_score=oracle_cfg.get("min_cnn_pose_score", 0.4),
             max_score_disagreement=oracle_cfg.get("max_score_disagreement"),
+            min_essential_contacts=oracle_cfg.get("min_essential_contacts", 1),
+        )
+
+    def _build_essential(
+        self, target_config: dict, global_config: dict, pocket_residue_ids: set
+    ) -> EssentialResidues | None:
+        """Assemble the essential-residue set from the protein alone.
+
+        Disabled (returns None) when the oracle's essential tier is off. The
+        static set is taken from the target's `pocket.essential_residue_ids` when
+        the target-prep tool (or a human) has written one; otherwise it is derived
+        here from receptor burial + polar character, so a target that knows
+        nothing about itself still gets a set. The emergent half accrues at
+        runtime as seeds calibrate (see _process_results). See
+        docs/modules/oracle.md "Tier 6".
+        """
+        if self.oracle_config.min_essential_contacts is None:
+            return None
+
+        oracle_cfg = self._merged_oracle_cfg(target_config, global_config)
+        static_ids = list(target_config["pocket"].get("essential_residue_ids") or [])
+        if not static_ids:
+            all_residues = parse_receptor_residues(self.receptor_path)
+            static_ids = select_static_essential(
+                all_residues,
+                pocket_residue_ids,
+                count=oracle_cfg.get("essential_static_count", 4),
+            )
+            self.log.write(
+                "INFO",
+                f"[ESSENTIAL] derived {len(static_ids)} residues from structure: "
+                f"{', '.join(static_ids) or 'none'}",
+            )
+
+        return EssentialResidues(
+            static=set(static_ids),
+            min_contacts=self.oracle_config.min_essential_contacts,
+            emergent_fraction=oracle_cfg.get("essential_emergent_fraction", 0.6),
+            emergent_min_poses=oracle_cfg.get("essential_emergent_min_poses", 3),
+            emergent_min_pose_score=oracle_cfg.get("essential_emergent_min_pose_score", 0.6),
+            max_active=oracle_cfg.get("essential_max_active", 6),
         )
 
     # ---------------- setup ----------------
@@ -217,6 +273,14 @@ class Campaign:
                 self.log.write("WARN", f"[RESUME] coverage checkpoint unusable, starting fresh: {exc}")
         else:
             self.log.write("WARN", f"[RESUME] no coverage checkpoint at {self.layout.coverage_path}")
+
+        if self.essential is not None and self._essential_path.exists():
+            self.essential.load_state(load_checkpoint(self._essential_path))
+            self.log.write(
+                "INFO",
+                f"[RESUME] essential-residue set restored: "
+                f"{', '.join(sorted(self.essential.active())) or 'static only'}",
+            )
 
     # ---------------- status ----------------
 
@@ -392,7 +456,33 @@ class Campaign:
                     self.state.evaluated.add(mutant.smiles)
                     continue
 
-                verdict = evaluate(modes, pose_text, self.oracle_config, smiles=mutant.smiles)
+                # Which pocket residues this pose contacts. Reused for both the
+                # essential-residue tier and the emergent-set calibration below;
+                # computed plainly (no interaction typing) so it is a set of bare
+                # residue ids regardless of the coverage map's mode.
+                contacts = build_fingerprint(
+                    pose_atoms,
+                    self.protein_residues,
+                    contact_cutoff=self.pocket_contact_cutoff,
+                    interaction_types_enabled=False,
+                )
+                essential_contacts = None
+                if self.essential is not None and self.essential.is_gating():
+                    essential_contacts = self.essential.engaged_count(contacts)
+
+                verdict = evaluate(
+                    modes,
+                    pose_text,
+                    self.oracle_config,
+                    smiles=mutant.smiles,
+                    essential_contacts=essential_contacts,
+                )
+
+                # A calibration (seed) pose votes on the emergent essential set,
+                # but only after it has been gated -- a pose never helps define
+                # the set it is judged against.
+                if self.essential is not None and mutant.stage == "calibration":
+                    self.essential.observe_calibration(contacts, verdict.cnn_pose_score)
 
                 self.state.evaluated.add(mutant.smiles)
 
@@ -415,6 +505,7 @@ class Campaign:
                         scoring_policy=verdict.scoring_policy,
                         novelty_class=obs.novelty_class,
                         new_coverage_bits=obs.new_bits,
+                        essential_contacts=verdict.essential_contacts,
                     )
                     if saved is not None:
                         self.state.hits += 1
@@ -550,6 +641,12 @@ class Campaign:
     def checkpoint(self) -> None:
         self.state.corpus.save(self.layout.corpus_dir / "state.json")
         self.state.coverage.save(self.layout.coverage_path)
+        if self.essential is not None:
+            # Emergent tallies only: the static set is rederived at startup. Most
+            # seeds are already calibrated on resume and so are never re-docked,
+            # which is exactly why this signal has to survive a restart -- without
+            # it the emergent set would reset to empty and never rebuild.
+            save_checkpoint(self._essential_path, {"version": 1, **self.essential.state_dict()})
         self.state.checkpoint_count += 1
         self._last_checkpoint_time = time.time()
         self.log.write(

@@ -15,9 +15,6 @@ from biofuzz.triage.record import TriageRecord, TriageStageResult
 # selective at all.
 DEFAULT_SELECTIVITY_MIN_DDG = 1.4
 
-# Retained only to interpret old configs that set a ratio threshold.
-DEFAULT_SELECTIVITY_RATIO_MIN = 2.0
-
 
 class SelectivityStage:
     name = "selectivity"

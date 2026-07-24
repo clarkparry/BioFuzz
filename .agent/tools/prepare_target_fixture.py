@@ -41,7 +41,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from biofuzz.prep.preparation import prepare_smiles
-from biofuzz.protein.residues import residue_key
+from biofuzz.protein.essential import select_static_essential
+from biofuzz.protein.residues import parse_receptor_residues, residue_key
+
+# How many essential (must-engage) residues to record per target. A small set:
+# the oracle's essential-contact tier is tolerant (a pose need only touch one),
+# so a large set would make it trivial. See biofuzz/protein/essential.py.
+ESSENTIAL_COUNT = 4
 
 # Reference-ligand prep only needs a valid embeddable 3D structure, not the
 # drug-likeness bounds applied to fuzzed candidates -- bounds are wide open
@@ -267,6 +273,68 @@ def detect_pockets(receptor_pdb: Path, workdir: Path) -> list[Pocket]:
     return sorted(pockets, key=lambda p: p.rank)
 
 
+def parse_p2rank_residue_scores(residues_csv: Path) -> dict[str, float]:
+    """P2Rank's per-residue ligandability, keyed by residue_key.
+
+    Read from ``<receptor>_residues.csv`` (distinct from the pocket-level
+    predictions file). Returns an empty map -- so the caller falls back to the
+    structure-only ranking -- if the file is absent or lacks the expected columns.
+    """
+    if not residues_csv.exists():
+        return {}
+    with residues_csv.open() as handle:
+        reader = csv.reader(handle, skipinitialspace=True)
+        header = [h.strip() for h in next(reader)]
+        col = {name: i for i, name in enumerate(header)}
+        chain_i = col.get("chain")
+        res_i = col.get("residue_label")
+        score_i = next(
+            (col[name] for name in ("probability", "zscore", "score") if name in col),
+            None,
+        )
+        if chain_i is None or res_i is None or score_i is None:
+            return {}
+
+        scores: dict[str, float] = {}
+        for row in reader:
+            if len(row) <= max(chain_i, res_i, score_i):
+                continue
+            chain = row[chain_i].strip()
+            resnum = row[res_i].strip()
+            if not chain or not resnum:
+                continue
+            try:
+                scores[residue_key(chain, resnum)] = float(row[score_i])
+            except ValueError:
+                continue
+    return scores
+
+
+def compute_essential_residue_ids(
+    receptor_pdbqt: Path,
+    pocket_residues: list[str],
+    workdir: Path,
+    receptor_pdb: Path,
+) -> list[str]:
+    """The must-engage residues for this pocket, derived from the protein alone.
+
+    Burial + polar character of the pocket residues (from the prepared receptor),
+    blended with P2Rank's per-residue ligandability when available. No inhibitor
+    is consulted -- this is the same structure-only ranking the campaign falls
+    back to at runtime, precomputed here so the checked-in config carries it.
+    """
+    all_residues = parse_receptor_residues(str(receptor_pdbqt))
+    p2rank_scores = parse_p2rank_residue_scores(
+        workdir / "p2rank" / f"{receptor_pdb.name}_residues.csv"
+    )
+    return select_static_essential(
+        all_residues,
+        set(pocket_residues),
+        count=ESSENTIAL_COUNT,
+        p2rank_scores=p2rank_scores or None,
+    )
+
+
 def select_pocket(pockets: list[Pocket], active_site_residues: tuple[str, ...]) -> Pocket:
     """Pick which detected pocket to use.
 
@@ -374,6 +442,7 @@ def write_config(
     center: tuple[float, float, float],
     size: tuple[float, float, float],
     residue_ids: list[str],
+    essential_residue_ids: list[str],
 ) -> bool:
     destination = target_dir / "config.yaml"
     if destination.exists() and destination.read_text(encoding="utf-8").startswith(HAND_CURATED_MARKER):
@@ -381,6 +450,12 @@ def write_config(
         return False
 
     residue_lines = "\n".join(f'    - "{residue_id}"' for residue_id in residue_ids)
+    # Must-engage residues, derived from the protein alone (see
+    # compute_essential_residue_ids). The oracle's essential-contact tier reads
+    # these; a hand-curated config that omits them makes the campaign rederive
+    # the same structure-only set at startup.
+    essential_lines = "\n".join(f'    - "{residue_id}"' for residue_id in essential_residue_ids)
+    essential_block = f"  essential_residue_ids:\n{essential_lines}\n" if essential_residue_ids else ""
     config_text = f'''name: {spec.name}
 receptor: protein.pdbqt
 
@@ -394,7 +469,7 @@ box:
 
 pocket:
   contact_cutoff: 3.5
-  residue_ids:
+{essential_block}  residue_ids:
 {residue_lines}
 '''
     config_text += _preserved_overrides(destination)
@@ -442,15 +517,19 @@ def build_target(spec: TargetSpec) -> None:
     pocket = select_pocket(pockets, spec.active_site_residues)
     residue_ids = sorted_residue_ids(pocket.residues)
     center, size = compute_box(pocket, residue_atoms)
+    essential_ids = compute_essential_residue_ids(
+        target_dir / "protein.pdbqt", pocket.residues, build_dir, receptor_pdb
+    )
 
-    config_written = write_config(spec, target_dir, center, size, residue_ids)
+    config_written = write_config(spec, target_dir, center, size, residue_ids, essential_ids)
     write_reference_ligand(spec, target_dir, build_dir)
 
     config_note = "" if config_written else " (config.yaml untouched)"
     print(
         f"prepared {spec.name}: pdb={spec.pdb_id} chains={spec.protein_chains} "
         f"pocket=rank{pocket.rank}/score{pocket.score:.2f} "
-        f"center={center} size={size} residues={len(residue_ids)}{config_note}"
+        f"center={center} size={size} residues={len(residue_ids)} "
+        f"essential={','.join(essential_ids) or 'none'}{config_note}"
     )
 
 
