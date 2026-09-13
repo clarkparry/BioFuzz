@@ -206,7 +206,7 @@ class Campaign:
         here from receptor burial + polar character, so a target that knows
         nothing about itself still gets a set. The emergent half accrues at
         runtime as seeds calibrate (see _process_results). See
-        docs/modules/oracle.md "Tier 6".
+        docs/architecture.md.
         """
         if self.oracle_config.min_essential_contacts is None:
             return None

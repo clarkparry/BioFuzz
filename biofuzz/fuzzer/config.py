@@ -20,7 +20,7 @@ def _merge_section(global_config: dict, target_config: dict, section: str) -> di
     return merged
 
 
-MERGED_SECTIONS = ("oracle", "docking", "triage", "molecules")
+MERGED_SECTIONS = ("oracle", "docking", "molecules")
 
 
 def merge_defaults(global_config: dict, target_config: dict) -> dict:

@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # The docking and coverage tests call gnina for real against a prepared
+      # receptor. Neither the engine nor the built receptors exist here, so CI
+      # runs everything else and the live-docking tests stay a local gate.
+      - run: pytest -k "not docker and not coverage"

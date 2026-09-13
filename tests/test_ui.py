@@ -2,7 +2,7 @@ import io
 import os
 
 from biofuzz.fuzzer import RuntimeStatus
-from biofuzz.ui import FuzzerTUI, JSONStatusUI, NoOpUI, QuietUI
+from biofuzz.ui import FuzzerTUI, QuietUI
 
 
 def test_tui_build_criterion(tmp_path, monkeypatch):
@@ -67,21 +67,6 @@ def test_tui_log_ring_bounded_at_10(tmp_path, monkeypatch):
     tui.close()
 
 
-def test_json_status_ui_emits_ndjson():
-    stream = io.StringIO()
-    ui = JSONStatusUI(stream=stream)
-    ui.update(RuntimeStatus(stage="dock", mutation_stage="havoc", hits=1))
-    ui.log("[HIT] test")
-    ui.close()
-
-    import json
-
-    lines = stream.getvalue().strip().splitlines()
-    assert len(lines) == 2
-    assert json.loads(lines[0])["hits"] == 1
-    assert json.loads(lines[1])["log"] == "[HIT] test"
-
-
 def test_quiet_ui_only_prints_hits():
     stream = io.StringIO()
     ui = QuietUI(stream=stream)
@@ -92,11 +77,3 @@ def test_quiet_ui_only_prints_hits():
     output = stream.getvalue()
     assert "[HIT]" in output
     assert "routine status message" not in output
-
-
-def test_noop_ui_does_nothing():
-    ui = NoOpUI()
-    ui.update(RuntimeStatus(stage="dock", mutation_stage="havoc"))
-    ui.log("anything")
-    ui.notice("anything")
-    ui.close()  # must not raise

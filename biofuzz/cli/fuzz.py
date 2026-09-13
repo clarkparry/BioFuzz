@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from biofuzz.fuzzer import Campaign, load_global_config, load_target_config, merge_defaults
-from biofuzz.ui import FuzzerTUI, JSONStatusUI, NoOpUI, QuietUI
+from biofuzz.ui import FuzzerTUI, QuietUI
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", default="config.yaml", help="Global config path")
     parser.add_argument(
-        "--ui", choices=["tui", "json", "quiet", "none"], default=None,
+        "--ui", choices=["tui", "quiet"], default=None,
         help="Display mode (default: from config.yaml, or tui on a TTY / quiet otherwise)",
     )
     return parser.parse_args()
@@ -56,11 +56,7 @@ def parse_args() -> argparse.Namespace:
 def _build_ui(mode: str, target: str, engine: str, workers: int, log_path):
     if mode == "tui":
         return FuzzerTUI(target=target, engine=engine, workers=workers, log_path=log_path)
-    if mode == "json":
-        return JSONStatusUI()
-    if mode == "quiet":
-        return QuietUI()
-    return NoOpUI()
+    return QuietUI()
 
 
 def main() -> int:

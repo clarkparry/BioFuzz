@@ -18,7 +18,7 @@ The protocol is deliberately simple, and the ordering is the point:
 Rounds are historical records. They describe the version they evaluated and are
 not updated to track later changes, except for inline notes where a later round
 revised a specific number. For current behaviour, read
-[`../modules/`](../modules/) and the [README](../../README.md).
+[`../architecture.md`](../architecture.md) and the [README](../../README.md).
 
 | Round | Target | Focus |
 |---|---|---|

@@ -40,7 +40,11 @@ Checklist when picking a PDB entry:
 
 ## 2. Add a `TargetSpec`
 
-In `tools/prepare_target_fixture.py`, add an entry to `TARGET_SPECS`:
+In `tools/prepare_target_fixture.py`, add an entry to `TARGET_SPECS`. Three
+specs beyond the two bundled targets are already there (`egfr_kinase`, `parp1`,
+`braf_v600e`), kept so the five-drug threshold calibration in
+[`architecture.md`](architecture.md) can be rebuilt; they are also worked
+examples of this step.
 
 ```python
 "my_target": TargetSpec(
@@ -78,9 +82,9 @@ This downloads the structure from RCSB, then automatically:
   must engage, ranked from receptor burial + polar character and blended with
   P2Rank's per-residue ligandability. Derived from the protein alone, never from
   an inhibitor; the oracle's essential-contact tier gates on it (see
-  [`modules/oracle.md`](modules/oracle.md) "Tier 6"). Omitting it is harmless:
-  the campaign rederives the structural half of the same set at startup, which
-  is why none of the five bundled configs carries one. Writing it at prep time
+  [`architecture.md`](architecture.md)). Omitting it is harmless: the campaign
+  rederives the structural half of the same set at startup, which is why
+  neither bundled config carries one. Writing it at prep time
   only adds P2Rank's ligandability signal to the ranking.
 - if `ligand_code`/`inhibitor_name` are set, emits an optional
   `reference_ligands/` entry (validation only — see step 4)
@@ -102,9 +106,9 @@ If you did name a known inhibitor, you can *validate* the oracle by docking the
 generated `reference_ligands/<name>.pdbqt` by hand and confirming it isn't
 rejected outright — a sanity check on the gate, never an input to it.
 
-**Expect some real drugs to miss the affinity tier.** Two of the five bundled
-reference drugs do not clear -9.0 (see
-[`modules/oracle.md`](modules/oracle.md)). That is the known cost of one absolute
+**Expect some real drugs to miss the affinity tier.** Two of the five drugs
+measured to set the thresholds do not clear -9.0 (see
+[`architecture.md`](architecture.md)). That is the known cost of one absolute
 cutoff across targets, not a sign your target is set up wrong. If your reference
 drug misses it, check the *other* tiers — ligand efficiency, pose confidence,
 essential contacts — before concluding anything, and rank in triage rather than
@@ -115,8 +119,9 @@ retuning the global gate.
 The global `molecules:` bounds (550 Da, logP 5.0) are drug-like defaults, and
 they will silently reject whole classes of real drug. Molecules outside them are
 dropped at preparation — before docking, with no finding and, for mutants, no log
-line. Two of the five bundled targets need overrides: hiv_protease
-(indinavir is 614 Da) and braf_v600e (vemurafenib is logP 5.54).
+line. The bundled hiv_protease target needs an override, because indinavir is
+614 Da; when braf_v600e was bundled it needed one too, for vemurafenib's logP
+of 5.54.
 
 If your target's known drugs are large, greasy, or unusually flexible, say so:
 

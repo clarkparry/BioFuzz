@@ -9,7 +9,6 @@ from biofuzz.triage.confirmation import ConfirmationDockingStage
 from biofuzz.triage.loader import load_findings
 from biofuzz.triage.pose_quality import LigandEfficiencyStage, PoseQualityStage
 from biofuzz.triage.record import TriageRecord
-from biofuzz.triage.selectivity import SelectivityStage
 
 _RECORD_FIELD_NAMES = {f.name for f in fields(TriageRecord)}
 
@@ -29,11 +28,6 @@ def default_stages(
         ADMETStage(),  # must run before LigandEfficiencyStage: it computes heavy_atom_count
         LigandEfficiencyStage(),
         ChemistryFlagsStage(),
-        SelectivityStage(
-            exhaustiveness=exhaustiveness_confirm,
-            cnn_model=cnn_model_confirm,
-            scoring_policy=scoring_policy,
-        ),
     ]
 
 

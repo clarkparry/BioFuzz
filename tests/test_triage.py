@@ -11,7 +11,6 @@ from biofuzz.triage.loader import load_findings
 from biofuzz.triage.pose_quality import LigandEfficiencyStage, PoseQualityStage
 from biofuzz.triage.record import TriageRecord
 from biofuzz.triage.report import write_report
-from biofuzz.triage.selectivity import SelectivityStage
 
 
 def _make_finding(tmp_path, smiles, affinity, name="000001_20250115T142301_-10.50"):
@@ -96,17 +95,6 @@ def test_ligand_efficiency_computed_correctly():
     result = stage.analyze(record, target_config={})
     assert result.fields["ligand_efficiency"] == 0.5
     assert "low_ligand_efficiency" not in result.flags
-
-
-def test_selectivity_stage_skips_when_not_configured():
-    stage = SelectivityStage()
-    record = TriageRecord(
-        finding_id="1", finding_dir=None, smiles="CCO", initial_affinity=-10.0, pose_path=None,
-        confirmed_affinity=-10.0,
-    )
-    result = stage.analyze(record, target_config={})
-    assert "selectivity_not_configured" in result.flags
-    assert result.fields == {}
 
 
 def test_clustering_groups_nearby_poses(tmp_path):

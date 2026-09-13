@@ -412,7 +412,7 @@ def _resolve_mk_prepare_receptor() -> list[str]:
         return [found]
     raise RuntimeError(
         "mk_prepare_receptor.py not found. It ships with Meeko: "
-        "`pip install -r requirements.txt` into the environment you are running."
+        "`pip install -e \".[dev]\"` into the environment you are running."
     )
 
 

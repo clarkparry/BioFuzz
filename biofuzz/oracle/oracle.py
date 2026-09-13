@@ -42,7 +42,7 @@ class OracleConfig:
     # and the per-pose contact count are computed by the campaign, which owns the
     # receptor geometry; the oracle only compares the count it is handed against
     # this floor, so it stays a pure function of its inputs. See
-    # biofuzz/protein/essential.py and docs/modules/oracle.md "Tier 6".
+    # biofuzz/protein/essential.py and docs/architecture.md.
     min_essential_contacts: int | None = 1
 
 

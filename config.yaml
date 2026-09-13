@@ -36,7 +36,7 @@ oracle:
   # The cost of that choice is that one absolute cutoff cannot suit every
   # target: it is loose on tight-binding sites and strict on weak ones. Of the
   # five bundled reference drugs, three clear -9.0 and two do not (see
-  # docs/modules/oracle.md). The reference-free quality tiers below are the
+  # docs/architecture.md). The reference-free quality tiers below are the
   # sharper discriminators; for a per-target notion of "good", rank hits in
   # triage rather than tuning this number to a specific molecule.
   affinity_threshold: -9.0
@@ -80,7 +80,7 @@ oracle:
   # the protein alone -- receptor burial and polar character, blended with
   # P2Rank ligandability at prep time, and refined at runtime by which residues
   # confident seed poses converge on. It never consults a known inhibitor. See
-  # biofuzz/protein/essential.py and docs/modules/oracle.md.
+  # biofuzz/protein/essential.py and docs/architecture.md.
   #
   # Minimum essential residues a pose must contact. Deliberately tolerant: 1
   # asks only that the pose reaches the anchor at all. null disables the tier.
@@ -102,20 +102,14 @@ oracle:
   # selective.
   essential_max_active: 6
 
-triage:
-  # Selectivity is a free-energy *difference*, kcal/mol (positive = prefers the
-  # on-target). 1.4 kcal/mol is one log unit of Kd, roughly 10x selective.
-  selectivity_min_ddg: 1.4
-
 # Property bounds for generated chemistry, applied at molecule preparation, so
 # anything outside them is dropped before docking.
 #
 # OVERRIDE THESE PER TARGET whenever the target's known drugs fall outside them.
 # Viable chemical space is a property of the target, not a global constant: this
-# envelope excludes indinavir (614 Da) and vemurafenib (logP 5.54), the
-# reference drugs for hiv_protease and braf_v600e, so both targets set their own
-# bounds. Excluding a target's own drug class means no campaign against it can
-# find anything resembling what works.
+# envelope excludes indinavir at 614 Da, the reference drug for hiv_protease, so
+# that target sets its own bounds. Excluding a target's own drug class means no
+# campaign against it can find anything resembling what works.
 #
 # The oracle's min_ligand_efficiency, not a blanket MW cap, is what keeps size
 # honest: it asks what the extra atoms are buying.
@@ -155,6 +149,6 @@ fuzzer:
   log_level: INFO
 
 ui:
-  # Display mode: tui | json | quiet | none. null picks tui on a TTY and quiet
-  # otherwise. Overridden by --ui.
+  # Display mode: tui | quiet. null picks tui on a TTY and quiet otherwise.
+  # Overridden by --ui.
   mode: null

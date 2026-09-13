@@ -62,8 +62,6 @@ def _write_top_hits(records: list[TriageRecord], top_hits_dir: Path, top_n: int)
             f"Vina affinity: {record.vina_affinity}",
             f"CNN affinity (kcal/mol): {record.cnn_affinity_kcal}",
             f"CNN pose score: {record.cnn_pose_score}",
-            f"Selectivity ddG (kcal/mol): {record.selectivity_ddg}",
-            f"Selectivity (fold): {record.selectivity_fold}",
             f"Flags: {', '.join(record.flags) or 'none'}",
             f"Filters failed: {', '.join(record.filters_failed) or 'none'}",
         ]

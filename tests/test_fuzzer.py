@@ -21,7 +21,7 @@ def test_target_config_has_no_reference_derived_oracle_threshold():
 
 def test_merge_defaults_gives_targets_the_global_reference_free_oracle():
     global_config = load_global_config("config.yaml")
-    target_config = load_target_config("egfr_kinase")
+    target_config = load_target_config("sars_cov2_mpro")
     merged = merge_defaults(global_config, target_config)
     # With no per-target oracle override, the target inherits the global oracle
     # wholesale -- the same reference-free threshold and tiers for every target.

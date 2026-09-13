@@ -4,7 +4,7 @@
 Input: a text file with one SMILES per line (optionally followed by an ID),
 sourced externally (e.g. a ChEMBL/DrugBank/PubChem approved-drug export).
 This script canonicalizes, applies the drug-likeness bounds from
-docs/modules/seeds.md, deduplicates, and caps scaffold repeats for
+docs/architecture.md, deduplicates, and caps scaffold repeats for
 diversity, per seeds.md's "Seed Set Maintenance" section.
 """
 from __future__ import annotations

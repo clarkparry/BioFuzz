@@ -9,7 +9,7 @@ has to touch, and a test of whether a docked pose touches them.
 
 The whole point is that the set is derived **from the protein alone** -- never
 from a known inhibitor, and without needing to know what the protein is. Three
-signals compose into it (see docs/modules/oracle.md "Tier 6"):
+signals compose into it (see docs/architecture.md):
 
   * **Static, structural (always available).** Score every pocket residue by how
     *buried* it is (deep residues are the anchor points a ligand must reach) and
