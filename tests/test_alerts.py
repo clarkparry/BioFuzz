@@ -14,9 +14,10 @@ SEEDS = Path(__file__).resolve().parents[1] / "seeds" / "approved_drugs.smi"
 
 PERMISSIVE = dict(min_mw=0.0, max_mw=2000.0, max_logp=99.0, max_hbd=99, max_hba=99, max_rot_bonds=99)
 
-# The two motifs the reference campaign actually generated and saved as findings:
-# an aryl-O-N-O and an aryl-O-CH2-O-H, both produced by atom_scan walking
-# sildenafil's ethoxy chain one atom at a time.
+# Two motifs the deterministic stage really does generate: an aryl-O-N(H)-O and
+# an aryl-O-CH2-O-H, both produced by atom_scan walking a sildenafil-like
+# ethoxy chain one atom at a time. Both pass every property bound and dock
+# well, so only a structural alert rejects them.
 CAMPAIGN_GARBAGE = {
     "n_o_single_bond": "CCCc1nn(N)c2c(=O)[nH]c(-c3c(N)c(S(=O)(=O)C4CCC(N)CC4)cc(F)c3ONO)cc12",
     "acyclic_acetal": "CCCc1nn(C)c2c(=O)[nH]c(-c3c(N)c(S(=O)(=O)C4CCC(N)CC4)cc(F)c3OCO)cc12",

@@ -54,7 +54,7 @@ def test_no_modes_is_not_a_hit():
     assert not verdict.is_hit
 
 
-# --- Tiers that were dead or missing in the reference campaign ---
+# --- Tiers beyond the affinity gate ---
 
 
 def test_strain_comes_from_the_intramol_column_not_a_pose_remark():
@@ -112,8 +112,12 @@ def test_ligand_efficiency_tier_disabled_by_none():
 
 
 def test_cnn_pose_score_tier_rejects_low_confidence_pose():
-    """The sharpest available tier: reference drugs score 0.80-0.97, and the
-    reference campaign's mutant chemistry scored ~0.32."""
+    """The sharpest available tier.
+
+    Measured through this pipeline the five bundled reference drugs score
+    0.60-0.98, while poses from unconstrained mutant chemistry commonly land
+    around 0.1-0.3, so the default floor of 0.4 separates them.
+    """
     cfg = OracleConfig(
         affinity_threshold=-9.0,
         strain_threshold=3.5,

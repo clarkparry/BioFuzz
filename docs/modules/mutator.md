@@ -40,7 +40,15 @@ The mutator returns a list of `MutationCandidate`. The caller decides how many t
 
 Systematic, exhaustive mutations at every valid position. Analogous to AFL++'s bit-flip and arithmetic deterministic stages — slow but complete. Every mutable site is visited.
 
-A corpus entry progresses through deterministic stage first, then is promoted to splice/havoc. Once an entry has been through deterministic, it skips to havoc on future selections (time already spent). This mirrors AFL++'s `SKIP_TO_HAVOC` flag.
+A corpus entry goes through the deterministic stage on its first selection only,
+then is promoted. This mirrors AFL++'s `SKIP_TO_HAVOC` flag: the systematic work
+has been done, so later selections spend their budget stochastically.
+
+The promotion rule is in `biofuzz/corpus/scheduler.py::select_stage`, and the
+trap it avoids is worth naming. "Splice if a donor exists, else havoc" makes
+havoc unreachable, because a donor exists whenever the corpus holds more than one
+molecule. Splice is therefore gated behind a probability (25%) and havoc is the
+default.
 
 Operations:
 
@@ -101,13 +109,22 @@ Havoc applies 1–8 operations per molecule in sequence, randomly selected, then
 
 `bioisostere_replace` uses a hardcoded SMARTS→SMARTS mapping of classical bioisostere pairs. The library is defined in the mutator module and can be extended without changing any other module.
 
-Core pairs (source → replacement):
-- `–COOH` → tetrazole, hydroxamic acid, sulfonamide, phosphonic acid
-- phenyl → pyridine, pyrimidine, thiophene, furan, pyrazole
-- `–CONH–` → reverse amide `–NHCO–`, urea, carbamate, sulfonamide
+The implemented set (`biofuzz/mutator/library.py`) is a **representative
+subset**, not a complete bioisostere table:
+
+- `–COOH` → tetrazole
+- `–OH` → `–F`, `–NH2`
+- `–CH2–` (linker) → `–O–`, `–NH–`
+
+Pairs worth adding, and deliberately not yet implemented:
+
+- `–COOH` → hydroxamic acid, sulfonamide, phosphonic acid
+- `–CONH–` → reverse amide, urea, carbamate, sulfonamide
 - ester → ketone, thioester, amide
-- `–OH` → `–NH2`, `–F` (as H-bond donors/acceptors)
-- `–CH2–` (linker) → `–O–`, `–NH–`, `–S–`
+
+phenyl → pyridine is already covered in practice by the `ring_atom_swap`
+havoc operation, so it is not duplicated here. The library is a flat list of
+(SMARTS, replacement) pairs and extending it touches no other module.
 
 ---
 
@@ -132,56 +149,64 @@ Failed candidates are discarded. The mutator keeps attempting until it fills the
 Property bounds say nothing about whether a molecule can exist. `atom_scan`
 walking an ethoxy tail one atom at a time produces `-O-N(H)-O-` and `-O-CH2-O-H`
 — a hydroxylamine ether and a hemiacetal — which pass every check above, dock
-well, and become findings. Nine of ten findings in one campaign carried such a
-motif. `mutator/alerts.py` is the gate for this, and it is deliberately narrow:
-it targets *unstable* motifs, not merely unattractive ones. RDKit's BRENK catalog
-was tried and rejected for the in-loop gate — it flags aspirin and every aniline.
-PAINS/BRENK belong in triage, where a flag is advisory. See
-`docs/evaluation_2026-07.md` §D1.
+well, and would be saved as findings. `mutator/alerts.py` is the gate for this.
+
+The catalog is deliberately **narrow**: it targets motifs that are unstable or
+not isolable (acyclic peroxides, N–O single bonds, acetals and aminals on acyclic
+carbons, geminal diols, acyl and heteroatom halides, allenes), not motifs that
+are merely unattractive. Ring-membership and acylation exclusions are what make
+that distinction hold, so that artemisinin's endoperoxide, paroxetine's
+benzodioxole, aspirin's phenol ester and vorinostat's hydroxamic acid all pass.
+`tests/test_alerts.py` asserts 0 of the 250 approved-drug seeds are flagged.
+
+RDKit's BRENK catalog was tried and rejected for the in-loop gate: it flags
+aspirin and every aniline, both well represented among approved drugs. PAINS and
+BRENK run in triage instead, where a flag is advisory rather than a hard reject.
 
 ### Bounds are per-target, and they must admit the target's chemical class
 
 Filter parameters come from the caller (`molecules:` in config, overlaid
 per-target). **Set them from the chemical class that binds the target.** A global
-550 Da / logP 5.0 envelope rejects, e.g., peptidomimetic protease inhibitors
-(600–720 Da) and lipophilic type-II kinase inhibitors (logP > 5) — whole classes
-— at the preparation step, silently, before docking. This is a chemical-space
-bound, not a known-inhibitor dependency: nothing is seeded or scored against a
-specific drug. Ligand efficiency, not a blanket MW cap, is the instrument for
-keeping size honest: it asks what the extra atoms buy. Where a target ships a
-validation reference drug, `tests/test_calibration.py` checks the target's bounds
-can at least prepare it — a guard against bounds that exclude the target's class.
-See `docs/evaluation_2026-07.md` §D2.
+550 Da / logP 5.0 envelope rejects peptidomimetic protease inhibitors (600–720
+Da) and lipophilic type-II kinase inhibitors (logP > 5) — whole classes — at the
+preparation step, silently, before docking. Two of the five bundled targets need
+an override for exactly this reason.
+
+This is a chemical-space bound, not a known-inhibitor dependency: nothing is
+seeded or scored against a specific drug. Ligand efficiency, not a blanket MW
+cap, is the instrument for keeping size honest, because it asks what the extra
+atoms buy. Where a target ships a validation reference drug,
+`tests/test_calibration.py` checks the target's own bounds can at least prepare
+it. See [adding_targets.md](../adding_targets.md).
 
 ---
 
 ## Stage Selection
 
-The fuzzer tracks the stage each entry is at. On first selection: deterministic. After deterministic completes: havoc (with splice mixed in when a suitable donor exists). The `CorpusEntry.mutation_lineage` list records the stage/operation sequence that produced each entry — use this to analyze which operations are yielding coverage.
+The fuzzer tracks the stage each entry is at, via `CorpusEntry.times_selected`
+rather than a stored stage field. First selection is deterministic; afterwards,
+havoc, with splice mixed in at 25% when a donor exists.
+
+Donor selection is **uniform random** over the rest of the corpus. Weighting it
+by coverage signal, as `corpus.md` suggests, is unimplemented.
+
+`CorpusEntry.mutation_lineage` records the last 10 operation names that produced
+an entry, so a completed campaign can be analysed for which operations actually
+yield coverage.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-from biofuzz.mutator import mutate_with_metadata
+`tests/test_mutator.py` runs each stage against phenol — deterministic and havoc
+directly, splice with a real donor — and asserts every returned candidate is
+valid, distinct from its parent, and inside the filter bounds.
 
-# Deterministic stage
-candidates = mutate_with_metadata("c1ccc(O)cc1", n=50, stage="deterministic")
-assert len(candidates) >= 10
-assert all(c.stage == "deterministic" for c in candidates)
-assert all(Chem.MolFromSmiles(c.smiles) for c in candidates)
+`tests/test_alerts.py` pins the structural-alert catalog in both directions: the
+two motifs the deterministic stage really does generate are rejected, and none of
+the 250 approved-drug seeds is. That second assertion is the important one; it is
+what stops the catalog being tightened into something that would reject real
+drugs.
 
-# Splice stage (with donor)
-splice_candidates = mutate_with_metadata(
-    "c1ccc(O)cc1", n=10, stage="splice",
-    donor_smiles="c1ccncc1C(=O)N"
-)
-assert len(splice_candidates) >= 1
-assert all(c.stage == "splice" for c in splice_candidates)
-
-# Havoc stage
-havoc_candidates = mutate_with_metadata("c1ccc(O)cc1", n=20, stage="havoc")
-assert len(havoc_candidates) >= 5
-assert "c1ccc(O)cc1" not in {c.smiles for c in havoc_candidates}  # no identity
-```
+`tests/test_scheduler.py` covers stage selection, including that havoc is
+reachable and dominant after the first selection.

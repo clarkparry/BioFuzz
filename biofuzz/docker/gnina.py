@@ -148,7 +148,16 @@ class GninaBackend(DockingBackend):
                 pass
 
 
-def _detect_gpu_active(log_text: str) -> bool:
+def _detect_gpu_active(log_text: str) -> bool | None:
+    """Whether gnina used a GPU, inferred from its banner.
+
+    gnina announces the absence of a GPU ("WARNING: No GPU detected.") but says
+    nothing when one is present, so presence can only be inferred from silence.
+    An empty or truncated log is reported as unknown (None) rather than as a
+    GPU run, since there is no evidence either way.
+    """
+    if not log_text.strip():
+        return None
     lowered = log_text.lower()
     if "no gpu detected" in lowered or "--no_gpu" in lowered:
         return False

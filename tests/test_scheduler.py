@@ -10,12 +10,12 @@ def test_first_selection_is_deterministic_stage():
 
 
 def test_havoc_is_reachable_and_dominant_after_first_selection():
-    """Havoc used to be unreachable.
+    """Havoc must be the common stage once deterministic is done.
 
-    The old rule was `deterministic if first selection, else splice if a donor
-    exists` -- and a donor exists whenever the corpus holds more than one
-    molecule, so havoc never ran. 0 of the reference campaign's 10 hits came
-    from it. AFL++ spends most of an input's budget in havoc.
+    AFL++ spends most of an input's budget in havoc, and it is the primary
+    discovery mechanism here too. The trap to avoid is preferring splice
+    whenever a donor exists: a donor exists whenever the corpus holds more than
+    one molecule, which would make havoc unreachable in practice.
     """
     entry = CorpusEntry(smiles="CCO", times_selected=2)
     rng = random.Random(1234)
@@ -59,12 +59,12 @@ def test_corpus_tracks_scaffold_counts():
 
 
 def test_crowded_scaffold_loses_to_fresh_chemistry():
-    """The mode-collapse fix, end to end.
+    """Scaffold crowding must outrank an equally-scoring incumbent series.
 
     Ten analogs of one series enter the corpus, then a molecule with an equal
-    coverage/affinity profile but an unseen scaffold. The newcomer must be
-    selected first, or the queue collapses onto one lineage the way the
-    reference campaign did (all 10 hits were sildenafil analogs).
+    coverage/affinity profile but an unseen scaffold. The newcomer has to be
+    selected first; otherwise the queue collapses onto a single lineage, since
+    every mutant of a good molecule is itself a good molecule.
     """
     corpus = Corpus(novelty_weight=10.0, affinity_weight=1.0)
 

@@ -12,8 +12,7 @@ from biofuzz.corpus import mutation_budget as compute_mutation_budget
 from biofuzz.corpus import select_stage
 from biofuzz.coverage import CoverageMap
 from biofuzz.coverage.fingerprint import build_fingerprint
-from biofuzz.docker import DockingConfig
-from biofuzz.docker.gnina import GninaBackend
+from biofuzz.docker import DockingConfig, get_backend
 from biofuzz.docker.parser import parse_log, parse_pose
 from biofuzz.fuzzer.status import RuntimeStatus
 from biofuzz.fuzzer.worker import dock_worker, prepare_worker
@@ -83,10 +82,11 @@ class Campaign:
         self.checkpoint_every = checkpoint_every
         self.checkpoint_every_seconds = checkpoint_every_seconds
         self.ui_callback = ui_callback
-        # `ui` is an optional richer object (e.g. FuzzerTUI) exposing both
-        # .update(status) and .log(message) -- the fuzzer.md doc only
-        # specifies a bare status callback, but ui.md's own log()/notice()
-        # methods need something to call them; this is that something.
+        # Two display channels, because one is not enough. `ui_callback` is the
+        # minimal contract: status structs only. `ui` is a richer object (e.g.
+        # FuzzerTUI) exposing .update(status), .log(message) and .close(), since
+        # hit text and notable events cannot travel through a status struct.
+        # Either, both, or neither may be attached.
         self.ui = ui
         self._rng = random.Random(seed)
 
@@ -129,6 +129,8 @@ class Campaign:
         self.pocket_contact_cutoff = target_config["pocket"].get("contact_cutoff", 3.5)
         self.protein_residues = parse_receptor_residues(self.receptor_path, pocket_residue_ids)
 
+        docking_cfg = target_config.get("docking", global_config.get("docking", {}))
+        self.engine = docking_cfg.get("engine", "gnina")
         self.docking_config = self._build_docking_config(target_config, global_config)
         self.oracle_config = self._build_oracle_config(target_config, global_config)
         self.essential = self._build_essential(target_config, global_config, pocket_residue_ids)
@@ -136,6 +138,7 @@ class Campaign:
 
         self._start_time = time.time()
         self._last_checkpoint_time = self._start_time
+        self._last_checkpoint_iteration = -1
         self._total_docks = 0
         self._completed_docks = 0
         self._last_gpu_active = None
@@ -240,9 +243,22 @@ class Campaign:
         # gets no priority boost: discovery must not be handed the answer. If a
         # known binder happens to already be in seeds/approved_drugs.smi it
         # competes on the same drug-likeness prior as everything else.
+        #
+        # The seed prior goes to `base_priority`, the entry's intrinsic worth.
+        # Writing it to `priority` instead would lose it: Corpus derives that
+        # field from base_priority minus scaffold crowding on every insert.
+        #
+        # Scaffold counts are read back from the corpus as it fills, so a seed
+        # whose scaffold is already represented earns a smaller diversity bonus
+        # than the first of its series. Without this the bonus is a constant and
+        # cannot order seeds at all.
         for smiles, seed_id in load_seeds(seeds_path):
-            priority = compute_seed_priority(smiles)
-            self.state.corpus.add(CorpusEntry(smiles=smiles, source_id=seed_id, priority=priority))
+            priority = compute_seed_priority(
+                smiles, corpus_scaffold_counts=self.state.corpus.scaffold_counts()
+            )
+            self.state.corpus.add(
+                CorpusEntry(smiles=smiles, source_id=seed_id, base_priority=priority)
+            )
 
         self.log.write("INFO", f"[SEED] adding {self.state.corpus.size()} seeds to corpus")
 
@@ -323,18 +339,18 @@ class Campaign:
     # ---------------- work ----------------
 
     def _select_stage(self, entry: CorpusEntry) -> tuple[str, str | None]:
-        # Corpus.pop() increments times_selected before returning the entry,
-        # so a value of 1 here means this is the first time it's been popped.
+        # A donor is only needed for splice; sample one up front so the
+        # scheduler knows whether that stage is available at all.
         donor = self.state.corpus.sample_donor(exclude_smiles=entry.smiles)
         stage = select_stage(entry, self._rng, has_donor=donor is not None)
         return stage, donor.smiles if (stage == "splice" and donor is not None) else None
 
     def _pool_or_none(self) -> ProcessPoolExecutor | None:
-        """One pool for the whole campaign.
+        """One pool for the whole campaign, created on first use.
 
-        The pool used to be created and torn down inside every iteration, so
-        every batch paid full interpreter start-up (and a fresh RDKit import)
-        per worker before any docking began.
+        The pool outlives individual iterations deliberately: tearing it down
+        per batch would make every batch pay full interpreter start-up, plus a
+        fresh RDKit import per worker, before any docking began.
         """
         if self.workers <= 1:
             return None
@@ -411,7 +427,7 @@ class Campaign:
         pool = self._pool_or_none()
         if pool is not None and len(prepared) > 1:
             futures = {
-                pool.submit(dock_worker, pdbqt, self.docking_config): mutant
+                pool.submit(dock_worker, pdbqt, self.docking_config, self.engine): mutant
                 for mutant, pdbqt in prepared
             }
             try:
@@ -427,7 +443,7 @@ class Campaign:
                 self._shutdown_pool(cancel_futures=True)
                 raise
         else:
-            backend = GninaBackend()
+            backend = get_backend(self.engine)
             for mutant, pdbqt in prepared:
                 result = backend.dock(pdbqt, self.docking_config)
                 results.append((mutant, result))
@@ -514,12 +530,15 @@ class Campaign:
                             if verdict.ligand_efficiency is not None
                             else ""
                         )
-                        hit_message = (
-                            f"[HIT] {mutant.smiles} | affinity={verdict.affinity:.2f}{le_text}"
+                        # FuzzerLog already renders the level, so the message
+                        # itself must not repeat it. The UI log ring has no
+                        # level column, so it gets the prefix.
+                        summary = (
+                            f"{mutant.smiles} | affinity={verdict.affinity:.2f}{le_text}"
                         )
-                        self.log.write("HIT", hit_message)
+                        self.log.write("HIT", summary)
                         if self.ui is not None:
-                            self.ui.log(hit_message)
+                            self.ui.log(f"[HIT] {summary}")
 
                 if self.state.best_affinity is None or verdict.affinity < self.state.best_affinity:
                     self.state.best_affinity = verdict.affinity
@@ -540,12 +559,12 @@ class Campaign:
     def _calibrate(self, entry: CorpusEntry) -> None:
         """Dock the entry itself, once, before fuzzing its mutants.
 
-        Seeds used to enter the corpus and only ever have their *mutants*
-        docked, so BioFuzz never actually measured whether an approved drug
-        binds the target -- which is the whole drug-repurposing use case. It
-        also left every seed with best_affinity=None, so the power schedule
-        was ranking seeds on no evidence at all. This is AFL++'s calibration
-        exec: run the input itself, learn what it does, then fuzz it.
+        This is AFL++'s calibration exec: run the input itself, learn what it
+        does, then fuzz it. Docking only an entry's mutants would leave two
+        things broken. The drug-repurposing question -- does this approved drug
+        bind this target? -- would never be asked, and every seed would keep
+        best_affinity=None, leaving the power schedule to rank seeds on no
+        evidence at all.
         """
         if entry.calibrated or entry.smiles in self.state.evaluated:
             entry.calibrated = True
@@ -557,11 +576,10 @@ class Campaign:
         if pdbqt is None:
             pdbqt = prepare_smiles(entry.smiles, **self.filter_kwargs)
             if pdbqt is None:
-                # Loudly: a seed that can't be prepared is a *known drug this
-                # campaign will never test*, and it is almost always the
-                # molecules bounds rejecting it rather than a chemistry problem.
-                # Silently skipping is how indinavir -- hiv_protease's own
-                # reference drug -- went untested against hiv_protease.
+                # Logged at WARN, not skipped silently: a corpus entry that
+                # cannot be prepared is a molecule this campaign will never
+                # test, and the cause is almost always the `molecules` bounds
+                # rejecting it rather than a defect in its chemistry.
                 self.state.prep_failures += 1
                 self.log.write(
                     "WARN",
@@ -627,10 +645,9 @@ class Campaign:
         """Checkpoint on iterations *or* elapsed time, whichever comes first.
 
         Iteration count alone is a bad clock here: one iteration is a whole
-        batch of docks, so at CPU docking speeds `checkpoint_every=500` is days
-        of work. The reference campaign ran ~2 hours and never checkpointed
-        once -- it left no corpus/state.json and no coverage.json, so none of
-        that compute could be resumed or inspected.
+        batch of docks, so at CPU docking speeds `checkpoint_every=500` can be
+        days of work. Without the wall-clock bound, a campaign can run for hours
+        and leave nothing resumable behind.
         """
         if self.checkpoint_every and self.state.iterations % self.checkpoint_every == 0:
             return True
@@ -638,7 +655,15 @@ class Campaign:
             return (time.time() - self._last_checkpoint_time) >= self.checkpoint_every_seconds
         return False
 
-    def checkpoint(self) -> None:
+    def checkpoint(self, force: bool = True) -> None:
+        """Persist corpus, coverage and essential-residue state.
+
+        `force=False` skips the write when no iteration has completed since the
+        last checkpoint, so the final checkpoint on exit does not duplicate the
+        one the last iteration just wrote.
+        """
+        if not force and self.state.iterations == self._last_checkpoint_iteration:
+            return
         self.state.corpus.save(self.layout.corpus_dir / "state.json")
         self.state.coverage.save(self.layout.coverage_path)
         if self.essential is not None:
@@ -649,6 +674,7 @@ class Campaign:
             save_checkpoint(self._essential_path, {"version": 1, **self.essential.state_dict()})
         self.state.checkpoint_count += 1
         self._last_checkpoint_time = time.time()
+        self._last_checkpoint_iteration = self.state.iterations
         self.log.write(
             "CHKPT",
             f"iterations={self.state.iterations} "
@@ -681,10 +707,12 @@ class Campaign:
                 self.state.stopped_reason = "corpus_exhausted"
         except KeyboardInterrupt:
             self.state.stopped_reason = "keyboard_interrupt"
+            # Always forced: an interrupt can land mid-iteration, and the
+            # partial progress is exactly what needs saving.
             self.checkpoint()
             self._finish()
             raise
 
-        self.checkpoint()
+        self.checkpoint(force=False)
         self._finish()
         return self.state

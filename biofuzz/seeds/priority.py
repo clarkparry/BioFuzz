@@ -18,14 +18,12 @@ MW_TOLERANCE = 200.0
 def base_affinity_estimate(smiles: str) -> float:
     """Prior on a seed's worth, before anything has been docked.
 
-    The MW term is deliberately a band centred on MW_REFERENCE, not a reward
-    for being heavy. It used to be `max(0, (mw - 350) / 100) * 2`, which grows
-    without bound with molecular weight: the heaviest seed in the file always
-    got popped first. That compounds with docking's own size bias -- raw
-    affinity already scales with heavy-atom count -- so the campaign started
-    from the biggest molecule available and its hits were all MW-500+ Lipinski
-    violators. Ranking on closeness to the middle of the drug-like band instead
-    lets small, ligand-efficient seeds compete.
+    The MW term is deliberately a band centred on MW_REFERENCE, and must not
+    become a reward for being heavy. An unbounded ramp in MW would compound
+    docking's own size bias -- raw affinity already scales with heavy-atom
+    count -- so the campaign would start from the largest seed available and
+    climb the molecular-weight gradient from there. Ranking on closeness to the
+    middle of the drug-like band lets small, ligand-efficient seeds compete.
     """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:

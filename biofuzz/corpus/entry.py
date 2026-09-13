@@ -21,9 +21,10 @@ class CorpusEntry:
     # stick once crowding changes.
     priority: float = 0.1
     # Intrinsic worth, independent of how crowded this entry's scaffold is: a
-    # seed prior at startup, or an evidence-based score once docked. Kept apart
-    # from `priority` so that recomputing the crowding term can never destroy a
-    # seed's carefully computed prior. Defaults to `priority` when unset.
+    # seed prior at startup, or an evidence-based score once docked. This is the
+    # field callers should set. Kept apart from `priority` so that recomputing
+    # the crowding term can never destroy a seed's prior. Defaults to
+    # `priority` when unset, which keeps older checkpoints loadable.
     base_priority: float | None = None
     # Bemis-Murcko scaffold, filled in by Corpus.add(). The scheduler uses it to
     # damp lineages that have taken over the queue.

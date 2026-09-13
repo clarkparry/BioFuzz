@@ -26,17 +26,14 @@ MERGED_SECTIONS = ("oracle", "docking", "triage", "molecules")
 def merge_defaults(global_config: dict, target_config: dict) -> dict:
     """Overlay a target's config onto the global defaults, section by section.
 
-    Every section in MERGED_SECTIONS is *merged*, not replaced. `docking` used to
-    be assigned straight from the global config, which silently discarded any
-    per-target docking override -- a target could set its own exhaustiveness or
-    CNN model and the fuzzer would ignore it.
+    Every section in MERGED_SECTIONS is *merged* rather than replaced, so a
+    target can override one key without restating the whole section.
 
     `molecules` is overlaid because viable chemical space is target-dependent.
     The global max_mw of 550 is a sensible drug-like bound, but HIV protease
-    inhibitors are legitimately 600-720 Da: at 550 the fuzzer silently rejects
-    indinavir -- hiv_protease's own reference drug and target-specific seed --
-    before it can ever be docked, so nothing of the chemical class that actually
-    works on that target could be found. See docs/evaluation_2026-07.md §D2.
+    inhibitors are legitimately 600-720 Da. At 550 the preparation step rejects
+    that entire class before docking, so no campaign against such a target could
+    generate anything resembling what works on it. See docs/adding_targets.md.
     """
     merged = dict(target_config)
     for section in MERGED_SECTIONS:

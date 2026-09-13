@@ -1,3 +1,8 @@
+# Runtime and test dependencies, mirroring pyproject.toml.
+#
+# pyproject.toml is canonical. Prefer `pip install -e ".[dev]"`, which also
+# installs the biofuzz-fuzz and biofuzz-triage console scripts. This file exists
+# for environments that only want the dependencies.
 PyYAML>=6.0
 rdkit>=2023.9.1
 scipy>=1.11.0

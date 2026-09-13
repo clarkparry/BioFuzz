@@ -32,11 +32,11 @@ The AFL++ equivalent is the crash signal: AFL doesn't try to analyze whether a c
   chemically implausible molecules before they are ever docked)
 - Know anything about coverage or the corpus
 
-Ligand efficiency was originally listed here as triage-only. It was moved into
-the loop because it is derivable from the single docking result the oracle
-already has — it costs one heavy-atom count — and leaving it to triage meant the
-campaign spent its entire budget climbing the molecular-weight gradient before
-anything noticed. See `docs/evaluation_2026-07.md` §A3.
+Ligand efficiency sits in the loop rather than in triage, even though it reads
+like a quality metric, because it is derivable from the single docking result the
+oracle already has: it costs one heavy-atom count. Leaving it to triage would let
+a campaign spend its whole budget climbing the molecular-weight gradient before
+anything noticed.
 
 ---
 
@@ -73,31 +73,31 @@ best_mode_score(policy) ≤ affinity_threshold
 `affinity_threshold` is a **single reference-free value in the global
 `config.yaml`**, inherited by every target. It is deliberately *not* derived from
 any known inhibitor: BioFuzz is meant to find binders for a protein you have no
-drug for, so nothing in the gate may be anchored to a drug you already have.
-Targets used to ship their own `affinity_threshold` measured as
-`reference_score + 1.0 kcal/mol`; that reliance has been removed.
+drug for, so nothing in the gate may be anchored to a drug you already have. No
+target may override it, and `tests/test_fuzzer.py` asserts that none does.
 
-An absolute affinity cutoff is inherently coarse without a per-target anchor — it
-will be loose on tight-binding targets and strict on weak ones — which is exactly
-why the reference-free quality tiers below (ligand efficiency, CNN pose
-confidence, vina/CNN consensus) do the real discriminating. If you want a
-per-target notion of "good", rank hits by score in triage rather than tuning this
-gate back to a specific molecule.
+An absolute cutoff is inherently coarse without a per-target anchor — loose on
+tight-binding targets, strict on weak ones. Measured through this pipeline, three
+of the five bundled reference drugs clear -9.0 and two do not (see the table
+below), which is a real cost rather than a rounding error. It is accepted because
+the alternative anchors the gate to the answer. The reference-free quality tiers
+below (ligand efficiency, CNN pose confidence, vina/CNN consensus) do the real
+discriminating; for a per-target notion of "good", rank hits by score in triage
+rather than tuning this gate to a specific molecule.
 
 ### Tier 2: Strain Energy
 ```
 intramol ≤ strain_threshold   (default 3.5 kcal/mol)
 ```
 **gnina does not report strain in pose REMARKs.** It reports it as the
-`intramol` column of the log's mode table (`DockingMode.intramol`). An earlier
-version of this document claimed otherwise, the implementation followed the
-document, and the result was that every finding recorded `strain: null` and this
-tier never gated anything. A pose-REMARK regex is retained only as a fallback for
-engines that do annotate poses.
+`intramol` column of the log's mode table (`DockingMode.intramol`), which is
+where `evaluate()` reads it from. A pose-REMARK regex is retained only as a
+fallback for engines that annotate the pose instead; gating on that regex alone
+would silently disable this tier on gnina.
 
 If no intramolecular term is available the tier is skipped — not failed.
 
-Measured reference-drug strain: -1.18 to +0.60 kcal/mol.
+Measured reference-drug strain across three replicates: -1.29 to +0.66 kcal/mol.
 
 ### Tier 3: Ligand Efficiency
 ```
@@ -107,18 +107,21 @@ Docking scores grow roughly linearly with heavy-atom count, so tier 1 alone
 selects for large, greasy molecules. Skipped (not failed) when no structure is
 available to count atoms.
 
-**Calibrate this against real drugs before tightening it.** The conventional 0.3
-floor rejects four of the five bundled reference drugs — peptidomimetics like
-indinavir (0.269) and nirmatrelvir (0.247) are legitimately LE-poor. Default 0.22.
+**Calibrate this against real drugs before tightening it.** Measured through
+this pipeline the five bundled reference drugs span LE 0.246 to 0.376, so the
+conventional 0.3 floor would reject three of them — erlotinib (0.25), indinavir
+(0.27) and nirmatrelvir (0.25), all legitimately LE-poor. Default 0.22.
 
 ### Tier 4: Pose Confidence
 ```
 cnn_pose_score ≥ min_cnn_pose_score   (default 0.4)
 ```
-gnina's CNN confidence that the pose is a real binding mode. The sharpest tier
-available: reference drugs score 0.801–0.980; all ten findings from one
-uncorrected campaign scored 0.108–0.314. Skipped when the engine reports no
-pose score.
+gnina's CNN confidence that the pose is a real binding mode, and the sharpest
+tier available. Measured across three replicates the five reference drugs score
+0.598–0.981, while poses from unconstrained mutant chemistry commonly land
+around 0.1–0.3, so a 0.4 floor separates them with room on both sides. Note that
+this number is noisier between runs than the affinity columns: erlotinib alone
+moved 0.598 to 0.731. Skipped when the engine reports no pose score.
 
 ### Tier 5: Score Agreement (off by default)
 ```
@@ -246,18 +249,33 @@ inherits the one reference-free oracle in `config.yaml`.
 The known inhibitors under `targets/<name>/reference_ligands/` remain as an
 optional **validation** set only. Docking them by hand answers "is my oracle so
 strict it would reject a real drug?" — a sanity check on the gate, not an input
-to it. The snapshot below (measured through this pipeline under the fuzzing
-settings) is what those five approved drugs score; it illustrates why the fixed
-LE floor is 0.22 rather than the textbook 0.3, which would reject the four
-LE-poorest of them:
+to it.
+
+Ranges below are from **three replicate runs** at the in-loop docking settings
+(exhaustiveness 8, `--cnn fast`, 3 modes) on a CPU-only host. Replication matters
+here: a single run reads like a precise measurement, and the CNN pose column in
+particular is not.
 
 | Target | Reference | vina | CNN | consensus | LE | CNN pose |
 |---|---|---|---|---|---|---|
-| braf_v600e | Vemurafenib | −11.33 | −12.51 | **−11.33** | 0.343 | 0.968 |
-| egfr_kinase | Erlotinib | −7.30 | −9.56 | **−7.30** | 0.252 | 0.801 |
-| hiv_protease | Indinavir | −12.12 | −13.15 | **−12.12** | 0.269 | 0.938 |
-| parp1 | Talazoparib | −11.90 | −10.45 | **−10.45** | 0.373 | 0.931 |
-| sars_cov2_mpro | Nirmatrelvir | −8.66 | −11.24 | **−8.64** | 0.247 | 0.966 |
+| hiv_protease | Indinavir | −12.09..−12.06 | −13.18..−13.16 | **−12.09..−12.06** | 0.268–0.269 | 0.941–0.942 |
+| braf_v600e | Vemurafenib | −11.46..−11.45 | −12.52..−12.49 | **−11.46..−11.45** | 0.347 | 0.961–0.963 |
+| parp1 | Talazoparib | −11.91..−11.89 | −10.52..−10.35 | **−10.52..−10.35** | 0.370–0.376 | 0.913–0.963 |
+| sars_cov2_mpro | Nirmatrelvir | −8.75..−8.68 | −11.32..−11.18 | **−8.75..−8.68** | 0.248–0.250 | 0.958–0.981 |
+| egfr_kinase | Erlotinib | −7.26..−7.14 | −9.77..−9.56 | **−7.26..−7.14** | 0.246–0.250 | 0.598–0.731 |
+
+Read three things off this table.
+
+It sets the LE floor: 0.22 rather than the textbook 0.3, which would reject
+erlotinib, indinavir and nirmatrelvir. It sets the pose-confidence floor: all
+five clear 0.4 comfortably. And it bounds the affinity tier's honesty — at
+−9.0, **hiv_protease, braf_v600e and parp1 pass; sars_cov2_mpro and egfr_kinase
+do not**, in all three replicates. Erlotinib in particular is a genuinely modest
+docker here. That is the price of refusing a per-target threshold.
+
+Note also that `consensus` tracks vina on four of five targets and the CNN on
+parp1, which is the policy working as intended: whichever function is less
+convinced sets the score.
 
 These are docking scores, in a different unit from any published Kd — a reminder
 that even for validation you must dock the molecule through this pipeline, never
@@ -265,31 +283,15 @@ compare against a literature affinity.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-from biofuzz.oracle import evaluate, OracleConfig
+`tests/test_oracle.py` and `tests/test_scoring.py` exercise this module: each
+tier passing and failing in isolation, the skip-don't-fail contract for every
+optional tier, strain read from the `intramol` column rather than a pose REMARK,
+and the three scoring policies against a captured gnina log.
 
-cfg = OracleConfig(affinity_threshold=-9.0, strain_threshold=3.5)
-
-# Strong binder with low strain → hit
-hit_modes = [DockingMode(mode=1, affinity=-10.5, rmsd_lb=0.0, rmsd_ub=0.0)]
-hit_pose = "REMARK VINA RESULT: -10.5 ...\\nREMARK GNINA INTRA ...\\n"
-verdict = evaluate(hit_modes, hit_pose, cfg)
-assert verdict.is_hit
-assert "affinity" in verdict.passed_tiers
-
-# Weak binder → no hit
-weak_modes = [DockingMode(mode=1, affinity=-6.0, rmsd_lb=0.0, rmsd_ub=0.0)]
-assert not evaluate(weak_modes, hit_pose, cfg).is_hit
-
-# High strain → no hit
-high_strain_pose = "REMARK strain 8.2\\n"
-assert not evaluate(hit_modes, high_strain_pose, cfg).is_hit
-
-# Missing strain annotation → still a hit (strain tier skipped, not failed)
-no_strain_pose = "REMARK VINA RESULT: -10.5\\n"
-verdict_no_strain = evaluate(hit_modes, no_strain_pose, cfg)
-assert verdict_no_strain.is_hit
-assert verdict_no_strain.strain is None
-```
+To re-measure the reference-drug table above, dock each
+`targets/<name>/reference_ligands/*.smi` through `prepare_smiles` and
+`GninaBackend.dock` at the config's `exhaustiveness_fuzz` and `cnn_model_fuzz`,
+then pass the parsed modes to `evaluate()`. Run it at least three times per
+target: single-run numbers overstate their own precision.

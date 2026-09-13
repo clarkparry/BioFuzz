@@ -5,7 +5,12 @@
 The docking backend is the "program under test." It takes a prepared ligand and protein, runs a docking simulation, and returns an affinity score plus a pose file. The module defines an abstract interface so the engine can be swapped without changing the fuzzer.
 
 **Default and primary implementation: gnina.**
-gnina is preferred over Vina because its CNN-based scoring function (trained on PDBbind) is meaningfully more accurate for most binding site geometries. GPU support also makes gnina ~10–15× faster than CPU Vina at comparable exhaustiveness.
+gnina is preferred over Vina because it returns a second, independent estimate
+of binding from a CNN trained on crystallographic complexes: a predicted affinity
+*and* a pose-plausibility score. That second opinion is what the oracle's
+consensus policy and pose-confidence tier are built on, and vina's empirical
+function cannot supply it. gnina can use a GPU when one is present; without one
+it still runs, taking tens of seconds per dock rather than a few.
 
 ---
 
@@ -49,6 +54,9 @@ DockingConfig:
   exhaustiveness: int
   num_modes: int
   timeout_seconds: int
+  workers: int = 1            # whether to constrain the engine to one thread
+  engine_path: str | None     # explicit binary path, overriding resolution
+  cnn_model: str | None       # gnina --cnn model, or None for its default
 
 DockingResult:
   success: bool
@@ -79,14 +87,24 @@ gnina
 
 **Important:** `--cpu 1` is only passed when the fuzzer is running multiple worker processes. If `workers=1`, omit this flag and let gnina use all available CPU threads internally. Passing `--cpu 1` on a single-worker run needlessly constrains gnina.
 
-**GPU detection:** inferred from gnina's log output. If the log contains `"warning: no gpu detected"` or `"--no_gpu"`, `gpu_active` is set to False. If the run completed successfully and no GPU warning appears, `gpu_active` is True.
+**GPU detection** is inferred from the log, and only one direction of the
+inference is sound. gnina announces a *missing* GPU ("WARNING: No GPU detected.")
+but says nothing when one is present, so `gpu_active` is False on that warning,
+True when a real log lacks it, and **None when there is no log to read** — an
+empty or truncated log carries no evidence either way and must not be reported as
+a GPU run.
 
 **Binary resolution order:**
-1. Explicit `--engine` path from config (if absolute or in PATH)
+1. `DockingConfig.engine_path`, when set (a per-call override)
 2. System PATH: `gnina`
 3. Repo-local: `.tools/bin/gnina`
 
-No fallback to vina or other engines is attempted. If gnina is unavailable, the fuzzer exits with a clear error message.
+Note that `docking.engine` in `config.yaml` is a different thing: it names *which
+backend class* to use, resolved through `get_backend()`, not where a binary lives.
+
+No fallback to vina or another engine is attempted. If gnina cannot be resolved,
+`dock()` returns an unsuccessful `DockingResult` rather than raising, and
+`runtime_issues()` explains why.
 
 ---
 
@@ -104,13 +122,17 @@ Parsing the raw log_text and pose PDBQT into structured data is the responsibili
 
 ```
 parse_log(log_text: str) -> list[DockingMode]
-parse_pose(pdbqt_text: str) -> list[PoseAtom]
+parse_pose(pdbqt_text: str) -> list[PoseAtom]          # first MODEL block
+parse_all_poses(pdbqt_text: str) -> list[list[PoseAtom]]
 
 DockingMode:
   mode: int
-  affinity: float      # kcal/mol, negative = favorable
-  rmsd_lb: float
-  rmsd_ub: float
+  affinity: float            # vina's empirical score, kcal/mol (negative = better)
+  rmsd_lb: float = 0.0       # only populated in the non-CNN table layout
+  rmsd_ub: float = 0.0
+  intramol: float | None     # intramolecular (strain) energy, kcal/mol
+  cnn_pose_score: float | None   # CNN pose plausibility, 0-1
+  cnn_affinity: float | None     # CNN-predicted affinity, pKd (higher = better)
 
 PoseAtom:
   name: str
@@ -118,10 +140,22 @@ PoseAtom:
   y: float
   z: float
   charge: float
-  type: str            # Vina atom type (C, OA, HD, etc.)
+  type: str            # AutoDock atom type (C, OA, N, SA, ...)
 ```
 
-`parse_pose` returns atoms from the **best pose only** (first MODEL block). Only heavy atoms (non-H) should be returned for coverage fingerprinting.
+**The mode table has two layouts, and both must be parsed.** With CNN scoring on
+(the default, and what the fuzzer runs) the columns are
+`affinity | intramol | CNN pose score | CNN affinity`. With `--cnn_scoring=none`
+it degrades to vina's `affinity | rmsd l.b. | rmsd u.b.`. The presence of a fifth
+numeric field distinguishes them. Under the default layout there are **no RMSD
+columns at all**, so `rmsd_lb`/`rmsd_ub` stay 0.0 and pose spread must be
+computed geometrically from `parse_all_poses` instead.
+
+Parsing only the second column would discard the strain signal and both CNN
+columns — that is, everything gnina was chosen for.
+
+`parse_pose` returns atoms from the best pose only and heavy atoms only;
+hydrogens are dropped for coverage fingerprinting.
 
 ---
 
@@ -129,39 +163,33 @@ PoseAtom:
 
 To add a new docking engine:
 1. Create a class implementing the `DockingBackend` interface in `biofuzz/docker/`
-2. Register it in `biofuzz/docker/__init__.py` under a string name
+2. Register it in the `backends` mapping in `get_backend()`
+   (`biofuzz/docker/__init__.py`)
 3. Set `docking.engine: <name>` in config.yaml
 
-No other module changes are needed.
+No other module changes are needed. The campaign resolves the engine by name
+through `get_backend()` on both the serial and worker-pool paths, and imports
+only the `DockingBackend` contract.
+
+A new backend must either populate `DockingMode.cnn_pose_score` and
+`cnn_affinity` or leave them `None`. Left `None`, the scoring policy falls back to
+the empirical score and the pose-confidence tier skips — degraded, but correct.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-from biofuzz.docker.gnina import GninaBackend
-from biofuzz.docker.parser import parse_log, parse_pose
+`tests/test_docker.py` exercises this module against the real engine rather than
+a mock, including a live dock of indinavir into `hiv_protease` and a check that
+`--cpu 1` is passed only when multiple workers are configured. That is most of
+the suite's runtime, and it is where drift in gnina's output format would
+surface. `tests/test_backend_selection.py` pins the registry contract.
 
-backend = GninaBackend()
-assert backend.available(), "gnina binary not found"
-assert backend.runtime_issues() == [], "gnina has runtime issues"
+`tests/test_scoring.py` parses a captured gnina log covering both table layouts,
+so the parser stays pinned without needing the binary.
 
-config = DockingConfig(
-    receptor_path="targets/hiv_protease/protein.pdbqt",
-    center_x=2.5, center_y=8.0, center_z=12.0,
-    size_x=20.0, size_y=20.0, size_z=20.0,
-    exhaustiveness=4, num_modes=3, timeout_seconds=120,
-)
-indinavir_pdbqt = open("targets/hiv_protease/reference_ligands/indinavir.pdbqt").read()
-
-result = backend.dock(indinavir_pdbqt, config)
-assert result.success
-assert result.pose_path is not None
-
-modes = parse_log(result.log_text)
-assert modes[0].affinity < -8.0   # indinavir should score well
-
-atoms = parse_pose(open(result.pose_path).read())
-assert len(atoms) > 0
-assert all(not a.type.upper().startswith("H") for a in atoms)  # heavy atoms only
-```
+Child-process cleanup is tested by injection, because OS signal delivery cannot
+be exercised in-process: `test_dock_process_killed_on_keyboard_interrupt` raises
+`KeyboardInterrupt` out of `communicate()` and asserts the child is killed, and
+the campaign-level test asserts a checkpoint is written and the exception
+re-raised. Together they cover the code that runs on a real Ctrl-C.

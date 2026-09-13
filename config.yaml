@@ -1,34 +1,46 @@
-# Global defaults -- overridden per target
+# BioFuzz global configuration.
+#
+# Every value here is a default. A target may override any key in the `docking`,
+# `oracle`, `triage` and `molecules` sections from its own
+# targets/<name>/config.yaml; sections are merged key by key, so a target
+# restates only what it changes. See docs/adding_targets.md.
+
 docking:
-  # 8, raised from 4. At exhaustiveness 4 a single dock is noisy enough to
-  # manufacture hits: findings from one reference campaign moved by up to
-  # 1.95 kcal/mol when re-docked, enough to flip them below the threshold.
+  # Search effort per dock. A single dock at low exhaustiveness is noisy enough
+  # to manufacture hits: re-docking the same molecule can move its score by more
+  # than a kcal/mol, which is enough to cross the gate in either direction.
+  # 8 in the loop, 16 when triage re-docks to confirm.
   exhaustiveness_fuzz: 8
   exhaustiveness_confirm: 16
-  # Per-dock wall-clock ceiling. Comfortable for cnn_model_fuzz: fast; gnina's
-  # full model ensemble takes ~97s per dock on an idle CPU here, so raise this
-  # if you set cnn_model_fuzz to null.
+  # Per-dock wall-clock ceiling, seconds. Comfortable for cnn_model_fuzz: fast.
+  # gnina's full model ensemble is far slower on CPU (of the order of a minute
+  # and a half per dock on an idle machine), so raise this if you set
+  # cnn_model_fuzz to null.
   timeout_seconds: 300
   # CNN model for gnina's pose/affinity scoring pass. "fast" uses a single
-  # lightweight model (~5x faster on CPU); null omits --cnn entirely, which
-  # falls back to gnina's default full model ensemble (slower, most accurate).
+  # lightweight model, several times quicker on CPU. null omits --cnn entirely,
+  # falling back to gnina's default full ensemble: slower, more accurate.
   cnn_model_fuzz: fast
   cnn_model_confirm: null
   num_modes: 3
+  # Docking backend, resolved by name through biofuzz.docker.get_backend.
+  # gnina is the only bundled implementation.
   engine: gnina
 
 oracle:
-  # Single reference-free affinity gate applied to every target. It is NOT
-  # derived from any known inhibitor -- targets used to ship their own
-  # affinity_threshold measured from where their reference drug docks, and that
-  # reliance has been removed. This is a conventional consensus-score cutoff; the
-  # reference-free quality tiers below (ligand efficiency, CNN pose confidence,
-  # vina/CNN consensus) are the sharper discriminators of a real binding event.
-  # An absolute score gate is inherently coarse without a per-target anchor -- if
-  # you want a per-target notion of "good", prefer a rank/percentile selection in
-  # triage over hand-setting this number back to a specific drug.
+  # A single reference-free affinity gate, inherited by every target. It is
+  # deliberately NOT derived from any known inhibitor: BioFuzz is meant to find
+  # binders for a protein you have no drug for, so a gate anchored to a drug you
+  # already have would defeat the premise.
+  #
+  # The cost of that choice is that one absolute cutoff cannot suit every
+  # target: it is loose on tight-binding sites and strict on weak ones. Of the
+  # five bundled reference drugs, three clear -9.0 and two do not (see
+  # docs/modules/oracle.md). The reference-free quality tiers below are the
+  # sharper discriminators; for a per-target notion of "good", rank hits in
+  # triage rather than tuning this number to a specific molecule.
   affinity_threshold: -9.0
-  # Intramolecular (strain) energy ceiling, kcal/mol. Sourced from gnina's
+  # Intramolecular (strain) energy ceiling, kcal/mol, read from gnina's
   # "intramol" table column.
   strain_threshold: 3.5
 
@@ -37,50 +49,44 @@ oracle:
   #   vina      -- empirical score only
   #   cnn       -- CNN prediction only (converted pKd -> kcal/mol)
   #   consensus -- the weaker of the two; a molecule must convince both
-  # "consensus" is the default because either function alone produces false
-  # positives that the other rejects, and requiring agreement is what kept the
-  # reference campaign's hits from surviving re-docking.
+  # consensus is the default because either function alone produces false
+  # positives that the other rejects.
   scoring_policy: consensus
 
   # Minimum ligand efficiency, kcal/mol per heavy atom. Docking scores grow with
-  # molecular size, so an affinity-only gate selects for big greasy molecules --
-  # every hit in the reference campaign was flagged low_ligand_efficiency and a
-  # Lipinski MW violator. Set to null to disable.
+  # molecular size, so an affinity-only gate selects for large greasy molecules.
+  # Set to null to disable.
   #
-  # 0.22, not the textbook 0.3, so the gate does not reject whole classes of real
-  # drug. Approved drugs span roughly LE 0.25 (peptidomimetics like nirmatrelvir
-  # and indinavir, which are legitimately LE-poor) to 0.37 (fragment-like
-  # inhibitors such as talazoparib); a 0.3 floor rejects the LE-poor end. This
-  # floor is a fixed drug-likeness default, reference-free at runtime -- it does
-  # not consult any known inhibitor of the target being fuzzed.
+  # 0.22, not the textbook 0.3: measured through this pipeline the five bundled
+  # reference drugs span LE 0.25 to 0.38, and a 0.3 floor would reject three of
+  # them. This is a fixed drug-likeness default, reference-free at runtime -- it
+  # does not consult any known inhibitor of the target being fuzzed.
   min_ligand_efficiency: 0.22
 
   # Minimum gnina CNN pose confidence, 0-1: does the network believe this is a
-  # real binding mode? This is the sharpest tier available. All five reference
-  # drugs score 0.80-0.97, while poses from the reference campaign's mutant
-  # chemistry score ~0.32, so 0.4 separates them with room on both sides.
-  # Set to null to disable.
+  # real binding mode? Set to null to disable. The five reference drugs measure
+  # 0.60-0.98 here, so 0.4 admits all of them with room to spare.
   min_cnn_pose_score: 0.4
 
   # Optional: reject when vina and the CNN disagree by more than this many
-  # kcal/mol. null disables the tier (the consensus policy already handles the
-  # common case).
+  # kcal/mol. null disables the tier, since the consensus policy already
+  # handles the common case.
   max_score_disagreement: null
 
-  # Essential-residue tier: does the pose actually engage the part of the pocket
-  # a real binder must touch? The scalar tiers above say how *tightly* a pose
-  # scores; this is the only tier that checks *where* it binds, catching a
-  # well-scored pose that sits in the wrong sub-pocket. The essential set is
-  # derived from the protein alone -- receptor burial + polar character, blended
-  # with P2Rank ligandability at prep time, and refined at runtime by which
-  # residues confident seed poses converge on. It never consults a known
-  # inhibitor. See biofuzz/protein/essential.py and docs/modules/oracle.md.
+  # Essential-residue tier: does the pose engage the part of the pocket a real
+  # binder must touch? The scalar tiers above say how *tightly* a pose scores;
+  # this is the only one that checks *where* it binds, catching a well-scored
+  # pose that sits in the wrong sub-pocket. The essential set is derived from
+  # the protein alone -- receptor burial and polar character, blended with
+  # P2Rank ligandability at prep time, and refined at runtime by which residues
+  # confident seed poses converge on. It never consults a known inhibitor. See
+  # biofuzz/protein/essential.py and docs/modules/oracle.md.
   #
-  # Minimum essential residues a pose must contact to pass. Deliberately
-  # tolerant: 1 asks only that the pose reaches the anchor at all. null disables
-  # the tier. The tier also self-disables per-target when no trustworthy
-  # essential set can be formed (no structure, empty pocket), skipping rather
-  # than rejecting on noise.
+  # Minimum essential residues a pose must contact. Deliberately tolerant: 1
+  # asks only that the pose reaches the anchor at all. null disables the tier.
+  # The tier also self-disables per target when no trustworthy essential set can
+  # be formed (no structure, empty pocket), skipping rather than rejecting on
+  # noise.
   min_essential_contacts: 1
   # How many top-ranked pocket residues form the structure-derived static set,
   # when a target's config does not pin its own pocket.essential_residue_ids.
@@ -92,26 +98,27 @@ oracle:
   essential_emergent_fraction: 0.6
   essential_emergent_min_poses: 3
   essential_emergent_min_pose_score: 0.6
-  # Ceiling on the gated set, so the tolerant "engage >= 1" gate stays selective.
+  # Ceiling on the gated set, so the tolerant "engage >= 1" gate stays
+  # selective.
   essential_max_active: 6
 
 triage:
   # Selectivity is a free-energy *difference*, kcal/mol (positive = prefers the
-  # on-target). 1.4 kcal/mol is one log unit of Kd, ~10x selective.
+  # on-target). 1.4 kcal/mol is one log unit of Kd, roughly 10x selective.
   selectivity_min_ddg: 1.4
 
-# Property bounds for generated chemistry. Applied at molecule preparation, so
+# Property bounds for generated chemistry, applied at molecule preparation, so
 # anything outside them is dropped before docking.
 #
-# OVERRIDE THESE PER-TARGET whenever the target's known drugs fall outside them.
+# OVERRIDE THESE PER TARGET whenever the target's known drugs fall outside them.
 # Viable chemical space is a property of the target, not a global constant: this
-# envelope rejects indinavir (614 Da) and vemurafenib (logP 5.54), which are the
+# envelope excludes indinavir (614 Da) and vemurafenib (logP 5.54), the
 # reference drugs for hiv_protease and braf_v600e, so both targets set their own
-# bounds in targets/<name>/config.yaml. Excluding a target's own drug class means
-# no campaign against it can find anything resembling what works.
+# bounds. Excluding a target's own drug class means no campaign against it can
+# find anything resembling what works.
 #
 # The oracle's min_ligand_efficiency, not a blanket MW cap, is what keeps size
-# honest -- it asks what the extra atoms are buying.
+# honest: it asks what the extra atoms are buying.
 molecules:
   max_mw: 550
   max_logp: 5.0
@@ -146,3 +153,8 @@ fuzzer:
   checkpoint_every: 500
   checkpoint_every_seconds: 300
   log_level: INFO
+
+ui:
+  # Display mode: tui | json | quiet | none. null picks tui on a TTY and quiet
+  # otherwise. Overridden by --ui.
+  mode: null

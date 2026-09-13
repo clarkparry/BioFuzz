@@ -29,37 +29,45 @@ The fuzzer is the campaign orchestrator. It owns the top-level run lifecycle: lo
 
 ```
 1. STARTUP
-   Load config.
+   Load and merge global + target config.
    Initialize Corpus, CoverageMap, FindingsStore, PDBQTCache.
-   Load checkpoints if a prior run exists in output_dir.
-   Add seed molecules directly to Corpus (no docking at this stage).
+   Parse the receptor's pocket residues; derive the essential-residue set.
+   If --resume: restore corpus, coverage and emergent essential tallies.
+   Otherwise: add seed molecules directly to Corpus (no docking at this stage).
 
 2. MAIN LOOP  (runs until Ctrl-C or --max-iterations reached)
-   entry = corpus.pop()
-   budget = power_schedule(entry)
-   mutants = mutator.mutate(entry.smiles, budget, stage=entry.next_stage())
+   entry = corpus.pop()                  // increments times_selected
 
-   For each mutant (in parallel via worker pool):
-     pdbqt = prep.prepare(mutant.smiles)            // skip if None
-     result = docker.dock(pdbqt, target_config)      // skip if failed
+   if not entry.calibrated:              // AFL++'s calibration exec
+       dock the entry ITSELF, once, and process the result
 
-   For each completed result (sequential, in main thread):
-     obs = coverage.observe(pose_atoms, protein_residues)
-     verdict = oracle.evaluate(result.affinity, result.pose_text)
-     if verdict.is_hit:
-         storage.save_finding(mutant.smiles, result, verdict)
-     corpus.add(mutant.smiles, novelty=obs.novelty_score, affinity=result.affinity)
+   stage, donor = select_stage(entry)    // deterministic -> splice/havoc
+   budget = mutation_budget(entry)       // power schedule
+   mutants = mutator.mutate(entry.smiles, budget, stage, donor)
 
-   corpus.add(entry)   // requeue parent (AFL++ persistent queue)
+   prepared = prepare_mutants(mutants)   // in the worker pool; skips
+                                         // already-evaluated and cached SMILES
+   results = dock_all(prepared)          // in the worker pool
 
-3. CHECKPOINT  (every N iterations and on any exit)
-   corpus.save(output_dir / "corpus/state.json")
-   coverage.save(output_dir / "coverage.json")
+   For each result (sequential, on the main process):
+     obs = coverage.observe(pose_atoms, protein_residues, smiles)
+     contacts = build_fingerprint(...)   // for the essential-residue tier
+     verdict = oracle.evaluate(modes, pose_text, cfg, smiles, essential_contacts)
+     if verdict.is_hit:  findings.save(...)     // deduped by SMILES
+     corpus.add(mutant.smiles, novelty=..., affinity=..., rarity=...)
+
+   entry.times_fuzzed += 1
+   entry.base_priority = corpus.compute_priority(entry)
+   corpus.add(entry)                     // requeue parent (persistent queue)
+
+3. CHECKPOINT  (every N iterations OR every N seconds, whichever first)
+   corpus.save(run_dir / "corpus/state.json")
+   coverage.save(run_dir / "coverage.json")
+   save emergent essential-residue tallies to run_dir / "essential.json"
 
 4. EXIT
-   Terminate worker pool cleanly.
-   Save final checkpoints.
-   Report summary stats to stdout.
+   Save final checkpoints (including on KeyboardInterrupt, before re-raising).
+   Shut down the worker pool; close the log; close the UI.
 ```
 
 ---
@@ -83,21 +91,45 @@ Key fields:
 
 ## Parallelism
 
-Workers are used only for docking (the bottleneck). Preparation runs in the main thread before jobs are dispatched. Coverage and corpus updates always run in the main thread after results return — neither is thread-safe.
+Workers handle **both** docking and preparation. Docking is the bottleneck, but
+conformer embedding and force-field optimisation are the second largest cost and
+are independent per molecule, so running them on the main process would leave the
+pool idle for a significant fraction of each batch.
 
-Preferred implementation: `concurrent.futures.ProcessPoolExecutor` with a fixed worker count. Jobs are submitted as a batch per mutation round. Results are collected as they complete.
+Coverage, oracle and corpus updates always run on the main process after results
+return. None of them is process-safe, and none is expensive enough to be worth
+making so.
+
+Implementation: one `concurrent.futures.ProcessPoolExecutor` for the whole
+campaign, created lazily on first use. It is deliberately not created per
+iteration — that would make every batch pay interpreter start-up and a fresh
+RDKit import per worker before any docking began. With `workers <= 1` no pool is
+created and the backend is called inline.
 
 On Ctrl-C:
-1. Signal workers to stop (SIGINT suppressed in workers; they finish current dock or timeout)
-2. Drain pending results
-3. Save checkpoints
-4. Exit with code 130
+1. `KeyboardInterrupt` propagates out of the result loop
+2. The pool is shut down with `cancel_futures=True`, and `GninaBackend` kills its
+   child process before letting the exception through, so no gnina survives
+3. A checkpoint is written and the log and UI are closed
+4. The exception is re-raised; the CLI reports it and exits with code 130
 
 ---
 
 ## Progress Reporting
 
-The fuzzer emits a `RuntimeStatus` dataclass to the UI via an optional callback. The callback is never called from worker processes — only from the main thread. The fuzzer does not know or care what the callback does (TUI, JSON log, or nothing).
+The fuzzer emits a `RuntimeStatus` dataclass to the UI. It is never emitted from
+a worker process, only from the main process, and the fuzzer does not know or care
+what the receiver does with it (TUI, JSON log, or nothing).
+
+Two channels exist, because one is not enough. `ui_callback` is a bare
+`Callable[[RuntimeStatus], None]` for callers that want status only. `ui` is an
+optional richer object exposing `.update(status)`, `.log(message)` and `.close()`,
+because hit and notable-event text cannot travel through a status struct. Either,
+both, or neither may be attached.
+
+Status is emitted after **every** completed dock, not once per batch: a single
+dock can take tens of seconds, and a per-batch update makes the display look
+frozen.
 
 `RuntimeStatus` fields (at minimum):
 - `stage: str` — current phase (mutate / prepare / dock / oracle / checkpoint / idle)
@@ -115,6 +147,10 @@ The fuzzer emits a `RuntimeStatus` dataclass to the UI via an optional callback.
 - `mutation_budget: int`
 - `mutation_stage: str`
 - `checkpoints: int`
+- `union_coverage: float` — the interpretable coverage number
+- `distinct_scaffolds: int`
+- `docks_skipped: int` — molecules already evaluated this campaign
+- `gpu_active: bool | None`
 
 ---
 
@@ -124,29 +160,50 @@ The fuzzer emits a `RuntimeStatus` dataclass to the UI via an optional callback.
 biofuzz-fuzz --target <name> [options]
 
 Required:
-  --target          Target name (looks up targets/<name>/config.yaml)
+  --target                     Target name (looks up targets/<name>/config.yaml)
 
 Optional:
-  --seeds           Path to seed SMILES file (default: seeds/approved_drugs.smi)
-  --output          Output directory (default: runs/<date>_<target>)
-  --max-iterations  Stop after N docking iterations (default: unlimited)
-  --workers         Worker count (default: from config.yaml)
-  --config          Global config path (default: config.yaml)
+  --seeds PATH                 Seed SMILES file (default: seeds/approved_drugs.smi)
+  --output DIR                 Base output dir (default: runs/<date>_<target>)
+  --max-iterations N           Stop after N iterations (default: unlimited)
+  --workers N                  Worker processes (default: from config.yaml)
+  --checkpoint-every N         Checkpoint every N iterations
+  --checkpoint-every-seconds S Also checkpoint on wall clock, whichever first
+  --resume RUN_DIR             Continue a previous campaign in place
+  --seed N                     RNG seed for stage and donor selection
+  --config PATH                Global config path (default: config.yaml)
+  --ui {tui,json,quiet,none}   Display mode (default: config, else TTY detection)
 ```
+
+`--seed` fixes BioFuzz's own random choices only. The docking engine seeds its
+search independently, so a run is not bit-reproducible.
+
+Exit codes: 0 on completion, 2 if `--resume` names a directory that does not
+exist, 130 on Ctrl-C.
 
 ---
 
-## Build Criterion
+## Verification
 
-Run for 10 iterations on a bundled target:
+`tests/test_fuzzer.py` covers config loading and merge semantics, including that
+no target ships its own `affinity_threshold`. `tests/test_calibration.py` covers
+the calibration exec — that an entry is docked itself before its mutants, and
+once only. `tests/test_resume.py` covers restoring a run in place and the
+finding-dedup that stops a resumed campaign re-saving what it already found.
 
+The interrupt path is tested by injecting `KeyboardInterrupt` from
+`run_iteration()` and asserting the campaign checkpoints, closes its log, and
+re-raises. Real OS signal delivery is not exercisable in-process, so that
+injection plus the backend-level child-kill test
+(`tests/test_docker.py::test_dock_process_killed_on_keyboard_interrupt`) is the
+coverage available.
+
+For a genuine end-to-end check, run a short campaign against a bundled target:
+
+```sh
+./biofuzz-fuzz --target hiv_protease --max-iterations 2 --workers 4 --seed 11
 ```
-biofuzz-fuzz --target hiv_protease --max-iterations 10 --workers 1
-```
 
-Verify:
-- Run completes without error
-- `runs/*/corpus/state.json` exists and contains entries
-- `runs/*/coverage.json` exists
-- No worker processes left hanging after exit
-- Ctrl-C at any point during the run produces clean checkpoints and exits with code 130
+Expect `corpus/state.json`, `coverage.json` and `fuzzer.log` in the run
+directory, a corpus larger than the seed count, and no orphaned gnina processes
+afterwards. Budget several minutes per iteration on CPU.

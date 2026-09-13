@@ -2,7 +2,7 @@
 """Install P2Rank locally for BioFuzz.
 
 P2Rank is the ligand-free pocket detector that supplies each target's docking box
-and pocket residue set (see .agent/tools/prepare_target_fixture.py). It is a Java
+and pocket residue set (see tools/prepare_target_fixture.py). It is a Java
 application: this installs the P2Rank distribution to .tools/p2rank/, but Java
 (>= 11) must already be available on the system -- the distribution does not
 bundle a JRE.
@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_VERSION = "2.4.2"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 # prank launcher ends up at .tools/p2rank/prank -- the path prepare_target_fixture
 # looks for as a repo-local fallback.
 DEFAULT_OUTPUT = REPO_ROOT / ".tools" / "p2rank"

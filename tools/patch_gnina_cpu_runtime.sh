@@ -11,7 +11,7 @@
 #   3. Patching gnina's rpath (via patchelf, installed as a pip wheel) so
 #      it finds all of the above without requiring LD_LIBRARY_PATH.
 #
-# Usage: .agent/tools/patch_gnina_cpu_runtime.sh [path-to-gnina-binary]
+# Usage: tools/patch_gnina_cpu_runtime.sh [path-to-gnina-binary]
 # Defaults to .tools/bin/gnina.
 set -euo pipefail
 
@@ -22,7 +22,7 @@ COMPAT_LIBS_DIR="$(dirname "$GNINA_BIN")/compat-libs"
 
 if [[ ! -x "$GNINA_BIN" ]]; then
   echo "gnina binary not found or not executable: $GNINA_BIN" >&2
-  echo "Run: $VENV/bin/python .agent/tools/install_gnina.py --variant compat" >&2
+  echo "Run: $VENV/bin/python tools/install_gnina.py --variant compat" >&2
   exit 1
 fi
 

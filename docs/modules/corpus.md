@@ -90,14 +90,14 @@ crowding term is re-derived.
 
 **Why crowding at all.** Every mutant of a good molecule is itself a good
 molecule, so without a diversity term the queue collapses onto one chemical
-series — 251 approved drugs went in and one 2-hour campaign explored essentially
-one of them, returning ten hits from a single scaffold. Log scaling keeps the
+series: hundreds of seeds go in, one lineage comes out. Log scaling keeps the
 first few analogs of a promising series cheap; the cap demotes a runaway series
-without exiling it. See `docs/evaluation_2026-07.md` §B2.
+without exiling it.
 
-**Reuse penalty was 0.1**, against a novelty weight of 10 — an entry had to be
-fuzzed 200 times before it fell behind a fresh sibling of equal novelty. It is
-now 1.0.
+**The reuse penalty has to be commensurate with the novelty weight.** At 0.1
+against a novelty weight of 10, an entry would need to be fuzzed 200 times before
+falling behind a fresh sibling of equal novelty, which is not a decay in any
+useful sense. It is 1.0.
 
 `pop()` re-derives the crowding term and re-queues if it has grown, so `add()`
 stays O(log n). Heap records are versioned so exactly one is live per molecule:
@@ -133,21 +133,34 @@ budget = max(1, base_mutations * budget_multiplier)
 
 AFL++ tracks "favored" entries — for each coverage bucket, the smallest/best corpus entry that uniquely covers it is marked favored. Non-favored entries still run but less often.
 
-BioFuzz equivalent: for each fingerprint hash bucket that has been hit, track which corpus entry first hit it (the "pioneer"). That entry is favored. When a higher-priority entry covers the same bucket, it inherits the favored flag.
+BioFuzz equivalent: for each fingerprint bucket that has been hit, Coverage
+tracks which molecule first hit it (the "pioneer"). That entry is favored,
+receives a large priority bonus, and is immune to eviction.
 
-Favored entries receive a large priority bonus. This ensures diverse coverage is maintained even as the corpus grows — the fuzzer cannot over-concentrate on one chemotype.
+**Reassignment is not implemented.** In AFL++ a better entry covering the same
+bucket inherits the favored flag; here `favored` is a sticky boolean and first
+hit wins. Reassignment needs Corpus and Coverage to coordinate over pioneer
+tracking, which is more coupling than the benefit has so far justified. Treat the
+flag as "was first here", not "is currently best here".
 
 ---
 
 ## Deduplication and Merging
 
-SMILES must be canonicalized (via RDKit) before any corpus operation. Two entries with the same canonical SMILES are merged:
-- `best_affinity`: take the more negative value
-- `novelty_score`: take the maximum
-- `finds`: take the maximum (not sum — to avoid double-counting)
-- `times_fuzzed`: take the maximum
-- `times_selected`: take the maximum
-- `favored`: logical OR
+SMILES must be canonicalized (via RDKit) before any corpus operation. Two
+entries with the same canonical SMILES are merged:
+- `best_affinity`: the more negative value
+- `novelty_score`, `rarity`: the maximum
+- `ligand_efficiency`: the maximum
+- `finds`: the maximum, not the sum, to avoid double-counting
+- `times_fuzzed`, `times_selected`: the maximum
+- `base_priority`: the maximum
+- `favored`, `calibrated`: logical OR
+
+`add()` takes two shapes. Passing a `CorpusEntry` trusts the caller's
+`base_priority` — this is how seeds enter and how checkpoints round-trip.
+Passing a bare SMILES string plus observations recomputes priority from the
+formula, which is how the campaign reports results back.
 
 ---
 
@@ -161,26 +174,26 @@ Favored entries are immune to eviction regardless of priority. This mirrors AFL+
 
 ## Checkpoint Format
 
-The corpus checkpoint is a JSON file containing a list of serialized `CorpusEntry` objects and the current `max_size`. On load, entries are re-inserted via `add()` to rebuild the heap from scratch. SMILES are re-canonicalized on load to guard against format drift.
+The corpus checkpoint is a JSON file containing the schema version, the current
+`max_size`, and a list of serialised `CorpusEntry` objects. On load, entries are
+re-inserted via `add()` to rebuild both heaps from scratch, and SMILES are
+re-canonicalized to guard against format drift.
+
+A version mismatch raises `CheckpointVersionError`; the checkpoint is rejected,
+never upgraded in place. Unknown fields on an entry are dropped rather than
+fatal, so adding an optional field does not invalidate existing checkpoints —
+the version guards changed *semantics*, not additions.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-corpus = Corpus(max_size=100)
+`tests/test_corpus.py` covers dedup and merge, trimming to `max_size` with
+favored entries immune, and checkpoint round-trip.
+`tests/test_checkpoint_compatibility.py` covers version rejection and tolerance
+of missing optional fields.
 
-# Fill beyond max_size to verify trimming
-for i in range(150):
-    corpus.add(CorpusEntry(smiles=f"C{i}", priority=float(i), ...))
-
-assert corpus.size() == 100                    # trimmed to max
-top = corpus.pop()
-assert top.priority == max of remaining        # highest priority comes out first
-
-corpus.save("corpus_test.json")
-corpus2 = Corpus()
-corpus2.load("corpus_test.json")
-assert corpus2.size() == corpus.size()         # round-trip
-assert corpus2.pop().smiles == top_smiles      # order preserved
-```
+`tests/test_scheduler.py` covers the scheduling behaviour that matters most:
+that an entry with an unseen scaffold beats ten equally-scoring analogs of a
+crowded one, and that an entry queued before its scaffold got crowded is repriced
+at selection rather than keeping a stale head-of-queue position.

@@ -15,13 +15,13 @@ The coverage module answers the most important question in the fuzzer: "Has this
   distinct *binding modes* rather than distinct contacts, under a two-epoch
   sliding window.
 
-The combination map alone is not a usable novelty signal, and BioFuzz originally
-had only that. A 256 KiB map holds 262,144 slots, so nearly every distinct pose
-hashes somewhere unseen and scores `strong` — novelty pinned at maximum is
-information-free, and it flattened the one term the scheduler needed to tell
-entries apart. It also gives no partial credit: `{A,B,C}` and `{A,B,C,D}` land in
-unrelated slots, so "reached a residue nothing had reached before" was
-inexpressible. See `docs/evaluation_2026-07.md` §C1.
+**The combination map alone is not a usable novelty signal.** A 256 KiB map
+holds 262,144 slots, so nearly every distinct pose hashes somewhere unseen and
+would score `strong`; novelty pinned at maximum is information-free and flattens
+the one term the scheduler needs to tell entries apart. It also gives no partial
+credit, since `{A,B,C}` and `{A,B,C,D}` land in unrelated slots, leaving "reached
+a residue nothing had reached before" inexpressible. Hence the union map, and
+hence `strong` being defined by it.
 
 ---
 
@@ -68,13 +68,23 @@ Residues are identified by chain-qualified ID: `"A:42"`, `"B:123"`. The full cha
 
 If `coverage.interaction_types: true` in config, each contacted residue is qualified with an interaction type suffix. This multiplies the effective coverage space by 3–4× with minimal compute overhead.
 
-Interaction types inferred from pose geometry:
+Interaction types are approximated from atom typing, not from full geometry:
 
-- `"A:42:hbond_donor"` — ligand has an H-bond donor (N–H, O–H) within 3.5 Å of a residue H-bond acceptor (O, N), with acceptable donor–acceptor angle
-- `"A:42:hbond_acceptor"` — ligand has an H-bond acceptor (O, N) near a residue donor
-- `"A:42:hydrophobic"` — non-polar ligand atom (aliphatic/aromatic C, S) within 4.0 Å of a hydrophobic residue atom (Cα, Cβ, aromatic ring)
+- `"A:42:hbond_acceptor"` — an AutoDock acceptor-typed ligand atom (`OA`, `NA`,
+  `SA`) in contact with the residue
+- `"A:42:hbond_donor"` — another polar heavy atom (N, O, S, not acceptor-typed)
+  in contact, treated as a possible donor
+- `"A:42:hydrophobic"` — a non-polar ligand heavy atom in contact
 
-When interaction typing is enabled, each contact can contribute up to 3 bits to the fingerprint (one per interaction type present). When disabled, each contact contributes 1 bit.
+**This is a documented approximation, and the reason is upstream.** True donor
+and acceptor character needs hydrogen positions and a donor–acceptor angle, but
+both `parse_pose` and `parse_receptor_residues` strip hydrogens by design
+(heavy atoms only), so neither is recoverable here. Enabling interaction typing
+therefore multiplies the coverage space by a signal that is directionally right
+and geometrically crude. It is off by default for that reason.
+
+When enabled, each residue occupies 4 fingerprint slots (bare contact plus three
+types). When disabled, each contributes 1.
 
 ### Step 3: Bitmask
 
@@ -158,9 +168,10 @@ which contacts have ever been reached; clearing it would make an already-explore
 pocket look novel again and re-trigger `strong` on contacts that are old news.
 
 **Rotation is largely theoretical at CPU docking speeds.** 0.55 occupancy of a
-256 KiB map needs ~144,000 distinct binding modes. A real 2-hour campaign reports
-`occupancy = 0.000`. This is not a bug — it is why the union map exists, and why
-`union_coverage()` rather than `bitmap_occupancy()` is the number to watch.
+256 KiB map needs on the order of 144,000 distinct binding modes, which a
+CPU-bound campaign will not reach; occupancy stays at 0.000 to three decimals.
+This is not a bug. It is why the union map exists, and why `union_coverage()`
+rather than `bitmap_occupancy()` is the number to watch.
 
 ---
 
@@ -168,9 +179,12 @@ pocket look novel again and re-trigger `strong` on contacts that are old news.
 
 | Metric | Meaning | Typical |
 |---|---|---|
-| `union_coverage()` | fraction of pocket contacts ever reached | **0.604** (29/48) after 2 iterations on hiv_protease |
+| `union_coverage()` | fraction of pocket contacts ever reached | rises quickly at first, then plateaus |
 | `bitmap_occupancy()` | fraction of combination hash space used | ~0.000 — sparse by construction |
 | `unreached_bits()` | pocket contacts nothing has reached: the frontier | — |
+
+The union denominator is the pocket size, so it varies by target: 48 contact bits
+for `hiv_protease` (a dimer-interface site), 19 for `sars_cov2_mpro`.
 
 `union_coverage` is the interpretable one, and the one surfaced in `RuntimeStatus`
 and the checkpoint log. `bitmap_occupancy` only drives epoch rotation.
@@ -192,19 +206,26 @@ When a new molecule hits an already-pioneered slot, the pioneer does not change 
 ```
 CoverageMap(
     pocket_residue_ids: Iterable[str],
-    map_size_bytes: int = 262144,               # 256 KiB
+    map_size_bytes: int = 262144,               # 256 KiB, must be a power of two
     occupancy_rotate_threshold: float = 0.55,
     interaction_types_enabled: bool = False,
     novelty_weights: dict[str, int] = {"strong": 2, "weak": 1, "none": 0},
+    contact_cutoff: float = 3.5,
 )
 
-.observe(pose_atoms, protein_residues) -> CoverageObservation
-.bitmap_occupancy() -> float
+.observe(pose_atoms, protein_residues=None, smiles=None) -> CoverageObservation
+.bitmap_occupancy() -> float        # combination map, drives epoch rotation
+.union_coverage() -> float          # the interpretable coverage number
+.unreached_bits() -> list[str]      # the frontier
 .pioneer_for(slot: int) -> str | None
-.save(path: str | Path) -> None
-.load(path: str | Path) -> None
 .stats() -> dict
+.save(path: str | Path) -> None
+.load(path: str | Path) -> None     # raises CheckpointVersionError on mismatch
 ```
+
+`observe()` accepts either shape: pose atoms plus receptor residues, which it
+routes through `build_fingerprint`, or an already-built fingerprint set, which it
+takes as given. `smiles` is optional and only credits pioneers.
 
 ```
 CoverageObservation:
@@ -217,6 +238,10 @@ CoverageObservation:
   bitmap_occupancy: float
   epoch: int
   rotated: bool
+  new_bits: int                # union bits this pose reached first
+  fingerprint_bits: int        # total contact bits in this pose
+  union_coverage: float        # campaign-wide, after this pose
+  rarity: float                # mean 1/(1 + prior hits) over this pose's bits
 ```
 
 ---
@@ -225,7 +250,7 @@ CoverageObservation:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "map_size_bytes": 262144,
   "occupancy_rotate_threshold": 0.55,
   "interaction_types_enabled": false,
@@ -233,59 +258,37 @@ CoverageObservation:
   "current_nonzero_count": 12341,
   "current_map_b64": "<base64>",
   "previous_map_b64": "<base64>",
+  "union_map_b64": "<base64>",
+  "union_counts": [12, 0, 5, 3],
+  "union_nonzero_count": 3,
   "pocket_residue_ids": ["A:25", "A:27", "A:50"],
   "residue_to_bit_index": {"A:25": 0, "A:27": 1, "A:50": 2},
   "novelty_counts": {"strong": 1243, "weak": 892, "none": 5821},
-  "pioneers": {"1024": "c1ccc(O)cc1", "2048": "CCO"}
+  "pioneers": {"1024": "c1ccc(O)cc1", "2048": "CCO"},
+  "bit_pioneers": {"0": "c1ccc(O)cc1"}
 }
 ```
 
-Version mismatch → reject checkpoint, do not upgrade silently.
+Version mismatch raises `CheckpointVersionError`. The checkpoint is rejected, not
+upgraded: the same field names carry different semantics between versions, so
+loading one anyway produces a campaign that looks resumed but classifies novelty
+against a map it does not understand.
+
+The hash function is part of the stable interface. Changing it invalidates every
+existing checkpoint.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-from biofuzz.coverage import CoverageMap
+`tests/test_coverage.py` covers this module: novelty classification across all
+three classes, union-bit accounting, rarity measured before a pose's own
+contribution, hit-frequency bucketing on repeat observations, epoch rotation, and
+checkpoint round-trip plus version rejection.
 
-cov = CoverageMap(
-    pocket_residue_ids={"A:25", "A:27", "A:50"},
-    map_size_bytes=1024,               # small for testing
-    occupancy_rotate_threshold=0.8,
-)
-
-fp1 = frozenset({"A:25", "A:27"})
-fp2 = frozenset({"A:25", "A:50"})    # different fingerprint
-fp3 = frozenset({"A:25", "A:27"})    # same as fp1
-
-obs1 = cov.observe(fp1)
-assert obs1.novelty_class == "strong"
-assert obs1.novelty_score == 2
-
-obs2 = cov.observe(fp2)
-assert obs2.novelty_class == "strong"     # different slot
-
-obs3 = cov.observe(fp3)
-assert obs3.novelty_class == "none"       # fp1's slot already in current
-
-# Epoch rotation
-cov2 = CoverageMap(pocket_residue_ids={"A:25", "A:27", "A:50"},
-                   map_size_bytes=1024, occupancy_rotate_threshold=0.01)
-cov2.observe(fp1)                         # triggers rotation
-assert cov2.epoch == 1
-obs4 = cov2.observe(fp1)
-assert obs4.novelty_class == "weak"       # fp1 in previous, not current
-
-# Checkpoint round-trip
-import tempfile, os
-with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-    path = f.name
-cov.save(path)
-cov_loaded = CoverageMap(pocket_residue_ids={"A:25", "A:27", "A:50"},
-                         map_size_bytes=1024)
-cov_loaded.load(path)
-assert cov_loaded.epoch == cov.epoch
-assert cov_loaded.strong_novelty_count == cov.strong_novelty_count
-os.unlink(path)
-```
+One test is a full-pipeline integration:
+`test_observe_with_real_pose_and_receptor_contacts` chains a real
+`GninaBackend.dock()` → `parse_pose()` → `parse_receptor_residues()` →
+`CoverageMap.observe()` against the `hiv_protease` fixtures, confirming contact
+detection fires on a genuinely docked pose rather than only on synthetic
+fingerprints. It is slow for that reason, and worth it.

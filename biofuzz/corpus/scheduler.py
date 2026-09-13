@@ -35,10 +35,9 @@ def scaffold_penalty(scaffold_count: int, weight: float = SCAFFOLD_PENALTY_WEIGH
 
     Without this the queue collapses onto one chemical series: every mutant of a
     good molecule is itself a good molecule, so it re-enters at high priority and
-    crowds out every other scaffold. The reference campaign returned ten hits
-    that were all the same sildenafil analog for exactly this reason. Log scaling
-    means the first few analogs of a promising series are barely penalised while
-    the twentieth is pushed firmly behind unexplored chemistry.
+    crowds out every other scaffold. Log scaling means the first few analogs of a
+    promising series are barely penalised, while the twentieth is pushed firmly
+    behind unexplored chemistry.
     """
     if scaffold_count <= 1:
         return 0.0
@@ -114,12 +113,12 @@ def mutation_budget(entry: CorpusEntry, base_mutations: int) -> int:
 def select_stage(entry: CorpusEntry, rng, has_donor: bool) -> str:
     """Pick the mutation stage for this selection of `entry`.
 
-    AFL++ runs the deterministic stage once per input and then spends the rest
-    of that input's budget in havoc, with splice mixed in. The previous rule
-    here was `deterministic if first selection else splice if a donor exists`,
-    and since a donor exists whenever the corpus holds more than one molecule,
-    havoc was unreachable -- 0 of the reference campaign's 10 hits came from it,
-    and the entire stochastic half of the mutator never ran.
+    AFL++ runs the deterministic stage once per input, then spends the rest of
+    that input's budget in havoc with splice mixed in. Havoc is the primary
+    discovery mechanism, so it must be the common case: gating splice behind a
+    probability matters because a donor is available whenever the corpus holds
+    more than one molecule, and preferring splice whenever one exists would make
+    havoc unreachable.
     """
     if entry.times_selected <= 1:
         return "deterministic"

@@ -49,8 +49,15 @@ RuntimeStatus:
   best_affinity: float | None
   checkpoints: int
   elapsed_seconds: float
-  gpu_active: bool | None
+  gpu_active: bool | None       # None means "cannot tell", not "no GPU"
+  union_coverage: float         # fraction of pocket contacts ever reached
+  distinct_scaffolds: int
+  docks_skipped: int            # molecules already evaluated this campaign
 ```
+
+`coverage_bitmap_occupancy` stays near zero by construction at CPU docking
+speeds; `union_coverage` is the coverage number worth displaying. See
+[coverage.md](coverage.md).
 
 ---
 
@@ -107,32 +114,41 @@ Since the UI is fully decoupled, alternative implementations require no changes 
 
 **Remote dashboard:** Emit status over a websocket. The fuzzer doesn't know the difference.
 
-The active UI implementation is configured in `config.yaml` under `ui.mode: tui | json | quiet`.
+The active implementation is configured in `config.yaml` under
+`ui.mode: tui | json | quiet | none`, overridden by `--ui`. When both are unset,
+the CLI picks `tui` on a TTY and `quiet` otherwise, so piping output does not
+produce escape sequences.
+
+`JSONStatusUI`, `QuietUI` and `NoOpUI` ship alongside the TUI in
+`biofuzz/ui/alternatives.py`.
 
 ---
 
 ## Decoupling Guarantee
 
-The fuzzer holds a `ui_callback: Callable[[RuntimeStatus], None] | None` reference. When None, no UI operations occur. When set, the callback is called in the main thread only — never from worker processes. The UI implementation must not block the calling thread for more than a few milliseconds.
+The fuzzer holds two independent, optional references, and needs both.
+
+`ui_callback: Callable[[RuntimeStatus], None] | None` is the minimal contract,
+for a caller that wants status and nothing else. `ui` is an object exposing
+`.update(status)`, `.log(message)` and `.close()`, because hit text and notable
+events cannot travel through a status struct. When both are None, no UI
+operations occur at all.
+
+Neither is ever called from a worker process. The implementation must not block
+the calling process for more than a few milliseconds; the campaign emits status
+after every completed dock.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-from biofuzz.ui.tui import FuzzerTUI
-from biofuzz.fuzzer import RuntimeStatus
+`tests/test_ui.py` constructs a `FuzzerTUI` against an injected `io.StringIO`
+rather than a real TTY, and checks that `update()` neither blocks nor raises,
+that `log()` and `notice()` reach the log file, that `close()` emits the
+alternate-screen exit sequence, and that the JSON, quiet and no-op
+implementations satisfy the same duck type.
 
-tui = FuzzerTUI(target="test", engine="gnina", workers=1, gpu_enabled=False)
-
-status = RuntimeStatus(stage="dock", mutation_stage="havoc", ...)
-tui.update(status)   # should not block or raise
-
-tui.log("[HIT] CCO | affinity=-10.5 | ...")
-tui.notice("gnina found, GPU inactive")
-tui.close()          # terminal must be restored cleanly
-
-# Verify log file was written
-import os
-assert os.path.exists("runs/test/fuzzer.log")
-```
+The log-file behaviour is the part worth pinning: the TUI owns its own
+`FuzzerLog` handle, so `log()` and `notice()` are written to disk whether or not
+a display is attached. Two append-mode handles on the same run's `fuzzer.log` —
+the campaign's and the TUI's — interleave safely at line granularity.

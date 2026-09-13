@@ -54,7 +54,11 @@ SMILES string
 PDBQT string
 ```
 
-The output PDBQT must contain `TORSDOF` and valid `BRANCH`/`ENDBRANCH` records. Verify this before returning.
+The output PDBQT must carry a `TORSDOF` record, plus `BRANCH`/`ENDBRANCH`
+records whenever `TORSDOF` is non-zero. `_is_valid_pdbqt` checks this before
+returning. A PDBQT missing its torsion tree is a rigid ligand in disguise:
+docking it yields a plausible-looking score for a molecule that was never allowed
+to flex.
 
 ---
 
@@ -90,13 +94,28 @@ prepare_smiles(
 ) -> str | None      # PDBQT string, or None on failure
 ```
 
-This is a pure function: same input always produces semantically equivalent output (conformer geometry may vary but the PDBQT encoding is equally valid). The cache layer wraps this function — the preparation module itself has no caching.
+The bounds are **required**, with no defaults. That is deliberate: a default MW
+cap applied silently inside the preparation step is exactly how a target's own
+chemical class gets excluded with nothing logged. The caller must state the
+envelope it wants.
+
+Same input always produces semantically equivalent output — conformer geometry
+varies with the embedding seed, but the PDBQT encoding is equally valid. The cache
+layer wraps this function; the preparation module itself has no caching.
 
 ---
 
 ## Pluggability
 
-The preparation backend is identified in config by name (`prep.backend: meeko`). To add a new backend (e.g., a wrapper around ADFRsuite's `prepare_ligand4.py`), implement the `prepare_smiles` interface and register it. The fuzzer calls only the interface; it does not import a specific backend directly.
+Preparation is **not** selected by config, unlike the docking backend and the
+UI. There is one implementation, behind the `prepare_smiles` function contract.
+Substituting another preparer — a wrapper around ADFRsuite's
+`prepare_ligand4.py`, say — means providing a function with that signature and
+the same failure contract (`None`, never a partial result), not registering a
+name in `config.yaml`.
+
+The contract is the part worth keeping stable: the fuzzer and triage both depend
+on "PDBQT string or None".
 
 ---
 
@@ -104,31 +123,24 @@ The preparation backend is identified in config by name (`prep.backend: meeko`).
 
 Preparation takes 1–5 seconds per molecule on a modern CPU. It is the second-slowest step after docking. To keep it off the critical path:
 
-- Run preparation in the main thread before dispatching dock jobs to workers. Workers receive ready PDBQT strings, not SMILES.
-- The PDBQT cache (Storage module) avoids re-preparing molecules seen in prior runs.
-- Drug-likeness filtering runs before any 3D step. Most mutants will fail the filter quickly — this is the desired behavior.
+- Preparation runs **in the same worker pool as docking** (`prepare_worker`).
+  Embedding and optimisation are pure CPU and independent per molecule, so
+  running them on the main process would leave the pool idle during the second
+  largest cost in the loop.
+- The PDBQT cache (Storage module) avoids re-preparing molecules seen in prior
+  runs, keyed on canonical SMILES.
+- Drug-likeness filtering runs before any 3D step. Most mutants fail the filter
+  quickly, which is the desired behaviour.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-from biofuzz.prep import prepare_smiles
+`tests/test_prep.py` covers the pipeline: a drug-like molecule yielding a PDBQT
+with a valid torsion tree, invalid SMILES returning `None`, property bounds
+rejecting an over-weight molecule, stable encoding across repeated calls, and the
+UFF fallback via phenylboronic acid, which has no MMFF parameters.
 
-# Valid drug-like molecule → PDBQT
-pdbqt = prepare_smiles("CC(=O)Oc1ccccc1C(=O)O")   # aspirin
-assert pdbqt is not None
-assert "TORSDOF" in pdbqt
-assert "BRANCH" in pdbqt or int(pdbqt.split("TORSDOF")[1].strip()) == 0
-
-# Invalid SMILES → None
-assert prepare_smiles("this is not smiles") is None
-
-# Molecule failing drug-likeness → None
-# e.g., a peptide with MW > 550
-assert prepare_smiles("ACDEFGHIKLMNPQRSTVWY", max_mw=550.0) is None
-
-# Repeated call → same TORSDOF (stable encoding)
-pdbqt2 = prepare_smiles("CC(=O)Oc1ccccc1C(=O)O")
-assert pdbqt.split("TORSDOF")[1] == pdbqt2.split("TORSDOF")[1]
-```
+`tests/test_calibration.py` additionally asserts that each bundled target's own
+`molecules:` bounds can prepare that target's reference drug — the guard against
+an envelope that would silently exclude the target's chemical class.

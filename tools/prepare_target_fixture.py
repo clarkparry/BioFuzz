@@ -32,10 +32,9 @@ import subprocess
 import sys
 import urllib.request
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 TARGETS_ROOT = REPO_ROOT / "targets"
-BUILD_ROOT = REPO_ROOT / ".agent" / "tools" / "target-build"
-MK_PREPARE_RECEPTOR = REPO_ROOT / ".venv" / "bin" / "mk_prepare_receptor.py"
+BUILD_ROOT = REPO_ROOT / "tools" / "target-build"
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -198,7 +197,7 @@ class Pocket:
     residues: list[str]  # residue_key form, e.g. "A:123"
 
 
-# Repo-local install written by .agent/tools/install_p2rank.py, mirroring how the
+# Repo-local install written by tools/install_p2rank.py, mirroring how the
 # gnina backend falls back to .tools/bin/gnina.
 _REPO_LOCAL_P2RANK = REPO_ROOT / ".tools" / "p2rank" / "prank"
 
@@ -216,7 +215,7 @@ def _resolve_p2rank() -> str:
     raise RuntimeError(
         "P2Rank not found. The docking box and pocket residues are derived from a "
         "ligand-free pocket detector, not from a co-crystal ligand. Install it with "
-        "`python .agent/tools/install_p2rank.py`, or put `prank` on PATH / set $P2RANK."
+        "`python tools/install_p2rank.py`, or put `prank` on PATH / set $P2RANK."
     )
 
 
@@ -398,10 +397,29 @@ def write_receptor_pdb(receptor_lines: list[str], destination: Path) -> Path:
     return destination
 
 
+def _resolve_mk_prepare_receptor() -> list[str]:
+    """Command that runs Meeko's receptor preparer.
+
+    Meeko installs `mk_prepare_receptor.py` as a console script next to the
+    running interpreter, so prefer that over PATH: it guarantees the Meeko in
+    this environment rather than whichever one happens to be on PATH first.
+    """
+    local = Path(sys.executable).parent / "mk_prepare_receptor.py"
+    if local.exists():
+        return [sys.executable, str(local)]
+    found = shutil.which("mk_prepare_receptor.py") or shutil.which("mk_prepare_receptor")
+    if found:
+        return [found]
+    raise RuntimeError(
+        "mk_prepare_receptor.py not found. It ships with Meeko: "
+        "`pip install -r requirements.txt` into the environment you are running."
+    )
+
+
 def prepare_receptor_pdbqt(receptor_pdb: Path, destination: Path) -> None:
     subprocess.run(
         [
-            str(MK_PREPARE_RECEPTOR),
+            *_resolve_mk_prepare_receptor(),
             "--read_pdb",
             str(receptor_pdb),
             "--write_pdbqt",

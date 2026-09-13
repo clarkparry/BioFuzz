@@ -1,10 +1,11 @@
 """Structural alerts for chemically implausible mutants.
 
 The drug-likeness filter (MW / logP / HBD / HBA / rotatable bonds) says nothing
-about whether a molecule could exist. Graph mutations happily produce motifs no
-chemist would synthesise -- the reference campaign's top hits carried aryl-O-N-O
-and aryl-O-CH2-O-H groups, produced by atom_scan walking an ethoxy chain one
-atom at a time. Those molecules docked well and were saved as findings.
+about whether a molecule could exist. Graph mutations readily produce motifs no
+chemist would synthesise: atom_scan walking an ethoxy chain one atom at a time
+yields aryl-O-N(H)-O and aryl-O-CH2-O-H, a hydroxylamine ether and a hemiacetal.
+Such molecules pass every property bound, dock well, and would be saved as
+findings, so they have to be rejected on structure instead.
 
 This catalog is deliberately narrow: it targets motifs that are *unstable or
 implausible*, not motifs that are merely unattractive. General medchem filters

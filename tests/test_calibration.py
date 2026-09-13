@@ -26,9 +26,9 @@ def test_seed_priority_survives_entering_the_corpus():
 def test_mw_prior_is_a_band_not_a_ramp():
     """The MW term must not reward sheer heaviness.
 
-    It used to be max(0, (mw - 350)/100) * 2, which grows without bound, so the
-    heaviest seed in the file was always popped first -- compounding docking's
-    own size bias. A mid-band molecule should now beat a very heavy one.
+    An unbounded ramp in MW would make the heaviest seed in the file the first
+    one popped, compounding docking's own size bias. A molecule near the centre
+    of the drug-like band must beat a much heavier one.
     """
     aspirin = base_affinity_estimate("CC(=O)Oc1ccccc1C(=O)O")  # MW 180
     sildenafil = base_affinity_estimate(
@@ -66,11 +66,12 @@ def test_calibration_marks_entry_and_records_affinity():
 def test_every_target_can_prepare_its_own_reference_drug():
     """A target whose bounds reject its own known drug can never find one.
 
-    hiv_protease's global-bound max_mw of 550 silently rejected indinavir (614 Da)
-    at the preparation step: the reference drug and only target-specific seed for
-    that target was never docked, no mutants of it were ever generated, and no
-    molecule of the peptidomimetic class that actually inhibits HIV protease
-    could be found. See docs/evaluation_2026-07.md §D2.
+    Preparation drops molecules outside the `molecules:` envelope before docking,
+    with no finding and, for a mutant, no log line. The global max_mw of 550
+    excludes indinavir (614 Da), so under global-only bounds no molecule of the
+    peptidomimetic class that actually inhibits HIV protease could be generated
+    at all. This asserts each target's own bounds admit its own chemistry.
+    See docs/adding_targets.md.
     """
     from pathlib import Path
 

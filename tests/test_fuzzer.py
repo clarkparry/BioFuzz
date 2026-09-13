@@ -12,9 +12,9 @@ def test_load_global_config():
 def test_target_config_has_no_reference_derived_oracle_threshold():
     config = load_target_config("hiv_protease")
     assert config["name"] == "hiv_protease"
-    # No target ships its own affinity_threshold any more: thresholds used to be
-    # calibrated from where the known inhibitor docks, and that reliance is gone.
-    # A target inherits the reference-free global oracle instead.
+    # No target may ship its own affinity_threshold. Calibrating one from where
+    # a known inhibitor docks would anchor the hit gate to the answer; targets
+    # inherit the reference-free global oracle instead.
     assert "affinity_threshold" not in config.get("oracle", {})
     assert len(config["pocket"]["residue_ids"]) > 0
 
@@ -39,8 +39,9 @@ def test_merge_defaults_gives_targets_the_global_reference_free_oracle():
 def test_merge_defaults_preserves_per_target_docking_override():
     """A target's own docking settings must not be discarded.
 
-    merge_defaults used to assign `docking` straight from the global config,
-    silently dropping any per-target override.
+    Sections are merged key by key rather than assigned wholesale, so a target
+    can raise its own exhaustiveness without restating the whole section and
+    without its override being silently dropped.
     """
     global_config = {"docking": {"engine": "gnina", "exhaustiveness_fuzz": 8}}
     target_config = {"docking": {"exhaustiveness_fuzz": 32}}

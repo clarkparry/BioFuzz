@@ -60,11 +60,11 @@ class CoverageMap:
 
     **Combination map** (`current`/`previous`) -- the whole fingerprint hashed
     to a single slot, tracking distinct *binding modes* rather than distinct
-    contacts. This is what the map used to be on its own, and alone it is close
-    to useless as a novelty signal: almost every distinct pose hashes to an
-    unseen slot, so almost everything scored "strong" and novelty became a
-    constant that told the scheduler nothing. It is retained as the weaker
-    signal, where it is meaningful.
+    contacts. On its own this is a poor novelty signal: the slot space is far
+    larger than the number of poses a campaign produces, so almost every
+    distinct pose hashes somewhere unseen and scores "strong", making novelty a
+    near-constant that tells the scheduler nothing. It is kept as the weaker of
+    the two signals, where it still distinguishes repeated binding modes.
 
     Novelty:
       strong -- reached a contact bit never reached before (new_bits > 0)

@@ -53,11 +53,11 @@ def test_load_seeds_defaults_id_to_smiles_when_missing(tmp_path):
 
 
 def test_seed_priority_takes_no_target_specific_flag():
-    """The target_specific priority boost is gone.
+    """No seed may be privileged for being the known answer.
 
-    It used to add a flat +5.0 so a target's own inhibitor floated to the top
-    of the queue and was docked first. compute_seed_priority no longer accepts
-    the flag at all, so no seed can be privileged for being the known answer.
+    A target-specific boost would float that target's own inhibitor to the top
+    of the queue to be docked first. compute_seed_priority accepts no such
+    flag, so the capability does not exist to be reintroduced by accident.
     """
     import inspect
 

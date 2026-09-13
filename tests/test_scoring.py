@@ -35,7 +35,8 @@ def test_parses_all_five_gnina_columns():
     assert len(modes) == 3
     first = modes[0]
     assert first.affinity == -9.81
-    # The columns that used to be silently dropped.
+    # All four numeric columns, not just vina's affinity: the CNN columns are
+    # what the consensus policy and the pose-confidence tier read.
     assert first.intramol == 1.30
     assert first.cnn_pose_score == 0.3207
     assert first.cnn_affinity == 6.795

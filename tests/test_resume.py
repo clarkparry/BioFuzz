@@ -20,8 +20,8 @@ def _save(store, tmp_path, smiles, affinity=-10.0, **kwargs):
 def test_duplicate_finding_is_suppressed(tmp_path):
     """The same molecule rediscovered twice must be saved once.
 
-    The reference campaign saved one molecule under two finding IDs, which
-    double-counted the hit and made triage re-dock it.
+    Mutation readily rediscovers a molecule already found. Saving it under a
+    second finding ID would double-count the hit and make triage re-dock it.
     """
     store = FindingsStore(tmp_path / "findings")
     smiles = "CCOc1ccccc1"

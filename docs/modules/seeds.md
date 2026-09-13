@@ -28,10 +28,21 @@ A curated set of ~100–300 FDA-approved small molecule drugs, selected for:
 - Variety of pharmacological targets: kinases, proteases, GPCRs, ion channels, etc.
 - No peptides, no biologics, no prodrugs requiring metabolic activation
 
-Sources:
-- ChEMBL "approved" drugs, filtered to small molecules (MW ≤ 500)
-- DrugBank small molecule approved drugs
-- FDA Orange Book with PubChem cross-reference for SMILES
+Source of the bundled file: the 861-compound approved-drug set
+(`data/external_library.csv`) published by the
+[AiCures / coronavirus_data](https://github.com/yangkevin2/coronavirus_data)
+project, canonicalised and filtered down to 250 by `tools/curate_seeds.py`. IDs
+are sequential (`approved_001`) because the source data carries no drug names.
+
+That repository declares no license. The entries reproduced here are canonical
+SMILES for approved drugs — structural facts rather than authored content — but
+regenerate the file from a source whose terms you have checked if you need a
+clean provenance chain.
+
+Any comparable approved-drug export works as a replacement — a ChEMBL "approved"
+query, a DrugBank small-molecule set, or the FDA Orange Book cross-referenced to
+PubChem for SMILES. Feed it to `tools/curate_seeds.py`, which applies the bounds
+above.
 
 Format: whitespace-separated SMILES + ID, one molecule per line, no header:
 ```
@@ -82,19 +93,21 @@ scaffold_diversity_bonus:
 
 This gives the corpus a non-trivial starting priority order without any docking. The first time each seed is popped, it gets docked, its actual affinity is recorded, and its priority is updated to reflect the real coverage signal.
 
-> **The MW term must not be an unbounded ramp.** This section previously read
-> "higher MW within range → bonus (bigger molecules tend to score better)". The
-> parenthetical is true, and that is precisely the problem: docking scores grow
-> with heavy-atom count as an *artifact*, so a seed prior that rewards size
-> compounds the bias instead of correcting for it. "Within range" was also not
-> implemented as a range — the code was `max(0, (mw - 350)/100) * 2`, unbounded,
-> so the heaviest seed in the file was always popped first. That is how one 2-hour
-> campaign came to spend itself entirely on sildenafil (MW 475). See
-> `docs/evaluation_2026-07.md` §B4.
->
-> Priority is `base_priority` on the CorpusEntry (intrinsic worth), not
-> `priority` (which the Corpus derives by subtracting scaffold crowding).
-> Assigning a seed prior to `priority` lets the queue overwrite it.
+Two constraints on the implementation of that formula are easy to get wrong.
+
+**The MW term must be a band, never an unbounded ramp.** It is true that heavier
+molecules tend to score better, and that is precisely the problem: docking scores
+grow with heavy-atom count as an *artifact*, so a prior that rewards size
+compounds the bias instead of correcting for it. A ramp such as
+`max(0, (mw - 350) / 100) * 2` makes the heaviest seed in the file the first one
+popped, and the campaign climbs the molecular-weight gradient from there.
+
+**The prior belongs in `base_priority`, not `priority`.** Corpus derives
+`priority` from `base_priority` minus scaffold crowding on every insert, so a
+prior written to `priority` is overwritten. The diversity term also needs the
+corpus's live scaffold census passed in; called without it,
+`scaffold_diversity_bonus` returns the same constant for every seed and the
+starting order degenerates to file order.
 
 ---
 
@@ -104,13 +117,11 @@ AFL++ does calibrate seeds on startup (runs them through the target to get their
 
 BioFuzz mirrors this: when a seed is first popped and docked, that's its calibration. If its affinity is poor, its priority drops and it gets selected less often. It stays in the corpus because it might still be useful as a splice donor. Discarding seeds based on poor initial docking would lose potentially valuable scaffolds.
 
-> **This is `Campaign._calibrate()`, and for a long time it did not exist.** The
-> fuzzing loop docked *mutants* only; a corpus entry was never docked itself. So
-> BioFuzz never measured whether an approved drug binds the target — the entire
-> drug-repurposing question, unasked — and every seed kept `best_affinity = None`
-> forever, leaving the power schedule to rank 251 seeds on no evidence at all.
-> The behaviour described in this section was specified here and simply never
-> implemented. See `docs/evaluation_2026-07.md` §B3.
+This is `Campaign._calibrate()`, and it is load-bearing rather than an
+optimisation. Docking only an entry's *mutants* would mean BioFuzz never measures
+whether an approved drug binds the target — the entire repurposing question,
+unasked — and every seed would keep `best_affinity = None` forever, leaving the
+power schedule to rank all 250 seeds on no evidence at all.
 
 ---
 
@@ -122,27 +133,18 @@ The `seeds/approved_drugs.smi` file is versioned in the repository. When updatin
 - Verify scaffold diversity (Murcko scaffold frequency distribution)
 - Ensure no duplicates (SMILES dedup by canonical form)
 
-A helper script `scripts/curate_seeds.py` handles canonicalization and deduplication.
+A helper script `tools/curate_seeds.py` handles canonicalization and deduplication.
 
 ---
 
-## Build Criterion
+## Verification
 
-```python
-from biofuzz.seeds import load_seeds
+`tests/test_seeds.py` runs against the real `seeds/approved_drugs.smi`, not a
+fixture: every SMILES must parse, be in RDKit canonical form, and be unique, and
+the set size must stay within the 50–500 band. `tests/test_seed_loading.py`
+covers the priors — that the diversity bonus actually discriminates when given
+the corpus census, and that a prior survives insertion.
 
-seeds = load_seeds("seeds/approved_drugs.smi")
-assert len(seeds) >= 50                              # minimum viable set
-assert len(seeds) <= 500                             # not too large
-
-from rdkit import Chem
-for smiles, seed_id in seeds:
-    mol = Chem.MolFromSmiles(smiles)
-    assert mol is not None, f"Invalid SMILES in seed: {seed_id}"
-    assert smiles == Chem.MolToSmiles(mol, canonical=True), \
-        f"Non-canonical SMILES in seed: {seed_id}"
-
-# Verify no duplicates
-smiles_set = {smiles for smiles, _ in seeds}
-assert len(smiles_set) == len(seeds), "Duplicate SMILES in seed file"
-```
+`tests/test_alerts.py` additionally asserts that none of the 250 seeds trips the
+structural-alert catalog, which is what keeps that catalog from being tightened
+into something that would reject real drugs.

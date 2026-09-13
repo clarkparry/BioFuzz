@@ -50,9 +50,9 @@ class ModeScore:
 def score_mode(mode, policy: str = "consensus") -> ModeScore:
     """Reduce a DockingMode to a single kcal/mol score under `policy`.
 
-    - ``vina``      -- vina's empirical score only (what BioFuzz used to do
-                       implicitly, and the reason gnina's CNN was being paid
-                       for but never used).
+    - ``vina``      -- vina's empirical score only. Note that this pays for
+                       CNN inference on every dock without using it; prefer
+                       ``--cnn_scoring=none`` if you truly want vina alone.
     - ``cnn``       -- the CNN prediction only, converted to kcal/mol.
     - ``consensus`` -- the *weaker* of the two (least negative). A molecule
                        only scores well if both functions agree it binds,

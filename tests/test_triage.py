@@ -1,5 +1,8 @@
 import json
 import os
+from pathlib import Path
+
+import pytest
 
 from biofuzz.triage.admet import ADMETStage
 from biofuzz.triage.chemistry_flags import ChemistryFlagsStage
@@ -155,3 +158,63 @@ def test_write_report_creates_expected_files(tmp_path):
     assert (top_hits[0] / "pose.pdbqt").exists()
     assert (top_hits[0] / "metadata.json").exists()
     assert (top_hits[0] / "summary.txt").exists()
+
+
+def test_ligand_efficiency_uses_the_oracle_definition():
+    """Triage must report the same quantity the in-loop tier gated on."""
+    from biofuzz.oracle.scoring import ligand_efficiency
+    from biofuzz.triage.pose_quality import LigandEfficiencyStage
+
+    record = TriageRecord(
+        finding_id="000001",
+        finding_dir=Path("."),
+        smiles="CCO",
+        initial_affinity=-10.0,
+        pose_path=Path("pose.pdbqt"),
+        confirmed_affinity=-10.0,
+        heavy_atom_count=25,
+    )
+    result = LigandEfficiencyStage().analyze(record, {})
+    assert result.fields["ligand_efficiency"] == ligand_efficiency(-10.0, 25)
+    assert result.fields["ligand_efficiency"] == pytest.approx(0.4)
+    assert result.flags == []
+
+
+def test_unfavourable_score_does_not_produce_a_good_ligand_efficiency():
+    """A positive (unfavourable) score must not be flipped into a strong LE.
+
+    Taking abs() of the affinity would make a molecule that docks badly look
+    maximally efficient, and the ranking would promote it.
+    """
+    from biofuzz.triage.pose_quality import LigandEfficiencyStage
+
+    record = TriageRecord(
+        finding_id="000002",
+        finding_dir=Path("."),
+        smiles="CCO",
+        initial_affinity=+8.0,
+        pose_path=Path("pose.pdbqt"),
+        confirmed_affinity=+8.0,
+        heavy_atom_count=10,
+    )
+    result = LigandEfficiencyStage().analyze(record, {})
+    assert result.fields["ligand_efficiency"] < 0
+    assert "low_ligand_efficiency" in result.flags
+
+
+def test_ranking_never_promotes_an_unfavourable_score():
+    """Rank must respect the sign of the binding energy."""
+    from biofuzz.triage.runner import _score
+
+    good = TriageRecord(
+        finding_id="1", finding_dir=Path("."), smiles="CCO",
+        initial_affinity=-11.0, pose_path=Path("p"),
+        confirmed_affinity=-11.0, ligand_efficiency=0.35,
+    )
+    unfavourable = TriageRecord(
+        finding_id="2", finding_dir=Path("."), smiles="CCC",
+        initial_affinity=9.0, pose_path=Path("p"),
+        confirmed_affinity=9.0, ligand_efficiency=0.9,
+    )
+    assert _score(good) > _score(unfavourable)
+    assert _score(unfavourable) == 0.0

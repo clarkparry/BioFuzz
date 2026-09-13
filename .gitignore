@@ -2,13 +2,19 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Downloaded third-party binaries (see README "Setup")
 .tools/bin/
 .tools/p2rank/
 
+# Campaign output
 runs/
-amp.log
 
-# Generated target fixtures — rebuild with .agent/tools/prepare_target_fixture.py
+# Generated target fixtures -- rebuild with tools/prepare_target_fixture.py
 targets/*/protein.pdbqt
 targets/*/reference_ligands/*.pdbqt
-.agent/tools/target-build/
+tools/target-build/

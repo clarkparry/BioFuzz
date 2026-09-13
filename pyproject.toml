@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biofuzz"
+version = "0.3.0"
+description = "Coverage-guided fuzzing applied to molecular docking"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Clark Parry" }]
+keywords = ["fuzzing", "molecular-docking", "drug-discovery", "cheminformatics"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+  "PyYAML>=6.0",
+  "rdkit>=2023.9.1",
+  "scipy>=1.11.0",
+  "gemmi>=0.6.0",
+  "meeko>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+biofuzz-fuzz = "biofuzz.cli.fuzz:main"
+biofuzz-triage = "biofuzz.cli.triage:main"
+
+[project.urls]
+Homepage = "https://github.com/clarkparry/BioFuzz"
+Source = "https://github.com/clarkparry/BioFuzz"
+
+[tool.setuptools.packages.find]
+include = ["biofuzz*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

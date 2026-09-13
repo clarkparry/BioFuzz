@@ -63,11 +63,17 @@ def run_triage(
 
 
 def _score(record: TriageRecord) -> float:
+    """Ranking score: binding strength weighted by ligand efficiency.
+
+    Both terms are taken with their sign intact, so a molecule with an
+    unfavourable (positive) confirmed score cannot rank above a real binder.
+    Findings that failed a filter sort to the bottom regardless.
+    """
     if record.filters_failed:
         return float("-inf")
     confirmed = record.confirmed_affinity if record.confirmed_affinity is not None else 0.0
     le = record.ligand_efficiency if record.ligand_efficiency is not None else 0.0
-    return abs(confirmed) * le
+    return max(0.0, -confirmed) * le
 
 
 def _assign_overall_rank(records: list[TriageRecord]) -> None:

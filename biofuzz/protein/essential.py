@@ -15,14 +15,16 @@ signals compose into it (see docs/modules/oracle.md "Tier 6"):
     *buried* it is (deep residues are the anchor points a ligand must reach) and
     how *polar/ionizable* it is (a charged or polar side chain buried in a pocket
     is expensive to bury, so the protein put it there for a functional reason).
-    The catalytic aspartate of HIV protease, the Cys/His of Mpro -- these surface
-    as the top-scoring residues without ever being named. Computed from the
-    receptor at startup; `structural_essential_scores`.
+    On the bundled `hiv_protease` receptor this recovers the catalytic
+    aspartate dyad (A:25 / B:25) as the top two residues, without either being
+    named. It is a heuristic, not a catalytic-site predictor: on
+    `sars_cov2_mpro` it ranks His41 fourth and does not surface Cys145 at all.
+    Computed from the receptor at startup; `structural_essential_scores`.
 
   * **Static, ligandability (when a detector ran).** P2Rank already scores each
     pocket residue by druggability when a target is prepared. Those scores, if
     present, are blended into the structural ranking; see
-    `.agent/tools/prepare_target_fixture.py`.
+    `tools/prepare_target_fixture.py`.
 
   * **Emergent, self-calibrating (accrues during a campaign).** BioFuzz docks its
     approved-drug seeds to calibrate them. The pocket residues that many

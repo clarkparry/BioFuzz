@@ -9,12 +9,10 @@ from biofuzz.oracle.scoring import ModeScore, best_mode, ligand_efficiency
 
 RDLogger.DisableLog("rdApp.*")
 
-# Legacy strain source. gnina does not actually emit an INTRA/strain REMARK in
-# its pose output -- the intramolecular energy lives in the log's mode table
-# instead (DockingMode.intramol). This regex is kept as a fallback for pose
-# files from other engines that do annotate strain, but the table is the real
-# source; relying on this alone is why every finding in the reference campaign
-# recorded strain=null and the strain tier never gated anything.
+# Fallback strain source, for engines that annotate strain on the pose itself.
+# gnina does not: it reports the intramolecular energy in the log's mode table
+# (DockingMode.intramol), which is the primary source evaluate() reads. Gating
+# on this regex alone would silently disable the strain tier on gnina.
 _STRAIN_RE = re.compile(
     r"REMARK\s+(?:GNINA\s+)?(?:INTRA|strain)[A-Za-z]*\s*[:=]?\s*(-?\d+\.?\d*)",
     re.IGNORECASE,

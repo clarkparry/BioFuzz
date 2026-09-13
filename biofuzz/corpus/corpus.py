@@ -11,7 +11,11 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 from biofuzz.corpus.entry import CorpusEntry
 from biofuzz.corpus.scheduler import compute_priority, effective_priority
 from biofuzz.corpus.smiles_canon import canonicalize
-from biofuzz.storage.checkpoint import load_checkpoint, save_checkpoint
+from biofuzz.storage.checkpoint import (
+    CheckpointVersionError,
+    load_checkpoint,
+    save_checkpoint,
+)
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -64,6 +68,14 @@ class Corpus:
 
     def distinct_scaffolds(self) -> int:
         return len(self._scaffold_counts)
+
+    def scaffold_counts(self) -> dict[str, int]:
+        """Live census of scaffold -> number of entries sharing it.
+
+        Returned by reference so a caller inserting in a loop (seed loading)
+        sees counts grow as it goes, rather than a snapshot taken up front.
+        """
+        return self._scaffold_counts
 
     def compute_priority(self, entry: CorpusEntry) -> float:
         """Intrinsic worth from this entry's own evidence (no crowding term)."""
@@ -249,6 +261,11 @@ class Corpus:
 
     def load(self, path) -> None:
         data = load_checkpoint(path)
+        version = data.get("version")
+        if version != CHECKPOINT_VERSION:
+            raise CheckpointVersionError(
+                f"corpus checkpoint version {version} != expected {CHECKPOINT_VERSION}"
+            )
         self.max_size = data.get("max_size", self.max_size)
         self._entries = {}
         self._max_heap = []

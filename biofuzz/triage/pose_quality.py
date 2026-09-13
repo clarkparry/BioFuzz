@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from biofuzz.oracle.scoring import ligand_efficiency
 from biofuzz.triage.record import TriageRecord, TriageStageResult
 
 
@@ -34,7 +35,14 @@ class LigandEfficiencyStage:
         if not record.heavy_atom_count:
             return TriageStageResult(fields={})
 
-        le = abs(affinity) / record.heavy_atom_count
+        # Shares the oracle's definition (-dG / heavy atoms) so the number in
+        # the report is the same quantity the in-loop tier gated on. Note the
+        # sign: abs() here would turn an unfavourable positive score into a
+        # good-looking LE.
+        le = ligand_efficiency(affinity, record.heavy_atom_count)
+        if le is None:
+            return TriageStageResult(fields={})
+
         flags = []
         if le < self.le_threshold:
             flags.append("low_ligand_efficiency")
